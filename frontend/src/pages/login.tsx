@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client'
 import { motion } from 'framer-motion'
 import LightRays from '@/components/backgrounds/LightRays'
 import { Button } from '@/components/ui/Button'
-import { Input } from '@/components/ui/Input'
 import '@/index.css'
 
 declare global {
@@ -24,19 +23,19 @@ function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen relative flex items-center justify-center bg-white">
+    <div className="min-h-screen relative flex items-center justify-center bg-black">
       {/* Animated Background */}
       <div className="fixed inset-0">
         <LightRays
           raysOrigin="top-center"
-          raysColor="#d1d5db"
-          raysSpeed={0.6}
-          lightSpread={1.5}
-          rayLength={2.5}
+          raysColor="#374151"
+          raysSpeed={0.5}
+          lightSpread={1.2}
+          rayLength={2.0}
           fadeDistance={1.5}
-          saturation={0.4}
+          saturation={0.3}
           followMouse={true}
-          mouseInfluence={0.1}
+          mouseInfluence={0.08}
         />
       </div>
 
@@ -47,7 +46,7 @@ function LoginPage() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5 }}
       >
-        <div className="bg-white/80 backdrop-blur-2xl rounded-3xl p-8">
+        <div className="bg-white/10 backdrop-blur-2xl rounded-3xl p-8 border border-white/10">
           {/* Logo / Title */}
           <motion.div
             className="text-center mb-8"
@@ -56,7 +55,7 @@ function LoginPage() {
             transition={{ delay: 0.2 }}
           >
             <img
-              src="/wp-content/plugins/dealer-system/dist/public/ZEEKR_black.png"
+              src="/wp-content/plugins/dealer-system/dist/ZEEKR_white.png"
               alt="ZEEKR"
               className="h-8 mx-auto mb-3"
             />
@@ -79,12 +78,13 @@ function LoginPage() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.3 }}
             >
-              <Input
+              <input
                 type="text"
                 name="username"
                 placeholder="Username or Email"
                 required
                 autoComplete="username"
+                className="w-full h-11 rounded-xl bg-white/10 border border-white/10 px-4 text-sm text-white placeholder:text-gray-500 focus:bg-white/15 focus:border-white/20 focus:outline-none transition-all"
               />
             </motion.div>
 
@@ -93,12 +93,13 @@ function LoginPage() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.4 }}
             >
-              <Input
+              <input
                 type="password"
                 name="password"
                 placeholder="Password"
                 required
                 autoComplete="current-password"
+                className="w-full h-11 rounded-xl bg-white/10 border border-white/10 px-4 text-sm text-white placeholder:text-gray-500 focus:bg-white/15 focus:border-white/20 focus:outline-none transition-all"
               />
             </motion.div>
 
@@ -110,7 +111,7 @@ function LoginPage() {
             >
               <Button
                 type="submit"
-                className="w-full h-11 text-sm font-medium"
+                className="w-full h-11 text-sm font-medium bg-white text-black hover:bg-gray-100"
               >
                 Sign In
               </Button>
@@ -119,7 +120,7 @@ function LoginPage() {
 
           {/* Footer */}
           <motion.p
-            className="mt-8 text-center text-gray-300 text-xs"
+            className="mt-8 text-center text-gray-500 text-xs"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: 0.6 }}

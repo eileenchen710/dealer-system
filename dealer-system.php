@@ -197,6 +197,10 @@ add_filter('script_loader_tag', function ($tag, $handle, $src) {
  * Get inventory data for React
  */
 function dealer_get_inventory_data() {
+    if (!function_exists('wc_get_product')) {
+        return ['products' => [], 'cartUrl' => '/', 'nonce' => '', 'ajaxUrl' => ''];
+    }
+
     $products = [];
 
     $args = [
@@ -239,8 +243,12 @@ function dealer_get_inventory_data() {
  * Get cart data for React
  */
 function dealer_get_cart_data() {
-    $cart = WC()->cart;
     $items = [];
+    $cart = null;
+
+    if (function_exists('WC') && WC()->cart) {
+        $cart = WC()->cart;
+    }
 
     if ($cart) {
         foreach ($cart->get_cart() as $cart_key => $cart_item) {
@@ -360,8 +368,8 @@ add_action('wp_head', function () {
         return;
     }
     ?>
-    <link rel="icon" type="image/x-icon" href="<?php echo DEALER_SYSTEM_URL; ?>dist/public/ZEEKR_black.ico">
-    <link rel="shortcut icon" href="<?php echo DEALER_SYSTEM_URL; ?>dist/public/ZEEKR_black.ico">
+    <link rel="icon" type="image/x-icon" href="<?php echo DEALER_SYSTEM_URL; ?>dist/ZEEKR_black.ico">
+    <link rel="shortcut icon" href="<?php echo DEALER_SYSTEM_URL; ?>dist/ZEEKR_black.ico">
     <style>
         /* Light theme base */
         html, body {
@@ -453,7 +461,10 @@ add_action('wp_body_open', function () {
     }
 
     $user = wp_get_current_user();
-    $cart_count = WC()->cart ? WC()->cart->get_cart_contents_count() : 0;
+    $cart_count = 0;
+    if (function_exists('WC') && WC()->cart) {
+        $cart_count = WC()->cart->get_cart_contents_count();
+    }
     ?>
     <style>
         .dealer-header-bar {
@@ -520,7 +531,7 @@ add_action('wp_body_open', function () {
     <div class="dealer-header-bar">
         <div class="dealer-logo">
             <a href="<?php echo home_url('/'); ?>">
-                <img src="<?php echo DEALER_SYSTEM_URL; ?>dist/public/ZEEKR_black.png" alt="ZEEKR" height="28">
+                <img src="<?php echo DEALER_SYSTEM_URL; ?>dist/ZEEKR_black.png" alt="ZEEKR" height="28">
             </a>
         </div>
         <nav class="dealer-nav">

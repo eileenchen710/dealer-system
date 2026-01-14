@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Dealer System
  * Description: Force login and dealer management for stock system
- * Version: 2.0.0
+ * Version: 2.0.6
  * Author: Vygox
  */
 
@@ -150,11 +150,11 @@ add_action('wp_enqueue_scripts', function () {
     }
 
     // Common styles
-    wp_enqueue_style('dealer-react-styles', $dist_url . 'css/style.css', [], '2.0.2');
+    wp_enqueue_style('dealer-react-styles', $dist_url . 'css/style.css', [], time());
 
     // Page-specific scripts (ES modules)
     if (is_page('login') && !is_user_logged_in()) {
-        wp_enqueue_script('dealer-login', $dist_url . 'js/login.js', [], '2.0.0', true);
+        wp_enqueue_script('dealer-login', $dist_url . 'js/login.js', [], time(), true);
         wp_localize_script('dealer-login', 'dealerLogin', [
             'loginUrl' => wc_get_page_permalink('myaccount'),
             'nonce' => wp_create_nonce('woocommerce-login'),
@@ -163,19 +163,19 @@ add_action('wp_enqueue_scripts', function () {
     }
 
     if (is_front_page() && is_user_logged_in()) {
-        wp_enqueue_script('dealer-inventory', $dist_url . 'js/inventory.js', [], '2.0.0', true);
+        wp_enqueue_script('dealer-inventory', $dist_url . 'js/inventory.js', [], time(), true);
         wp_localize_script('dealer-inventory', 'dealerInventory', dealer_get_inventory_data());
     }
 
     // Cart page
     if (is_cart() && is_user_logged_in()) {
-        wp_enqueue_script('dealer-cart', $dist_url . 'js/cart.js', [], '2.0.0', true);
+        wp_enqueue_script('dealer-cart', $dist_url . 'js/cart.js', [], time(), true);
         wp_localize_script('dealer-cart', 'dealerCart', dealer_get_cart_data());
     }
 
     // Orders page
     if (is_wc_endpoint_url('orders') && is_user_logged_in()) {
-        wp_enqueue_script('dealer-orders', $dist_url . 'js/orders.js', [], '2.0.0', true);
+        wp_enqueue_script('dealer-orders', $dist_url . 'js/orders.js', [], time(), true);
         wp_localize_script('dealer-orders', 'dealerOrders', dealer_get_orders_data());
     }
 });
@@ -217,15 +217,31 @@ function dealer_get_inventory_data() {
 
         if (!$product) continue;
 
-        $categories = wp_get_post_terms(get_the_ID(), 'product_cat', ['fields' => 'names']);
+        $product_id = get_the_ID();
+        $categories = wp_get_post_terms($product_id, 'product_cat', ['fields' => 'names']);
+
+        // Get order type prices
+        $stock_price = (float) get_post_meta($product_id, '_stock_order_price', true);
+        $daily_price = (float) get_post_meta($product_id, '_daily_order_price', true);
+        $vor_price = (float) get_post_meta($product_id, '_vor_order_price', true);
+
+        // Fallback to regular price if not set
+        $default_price = (float) $product->get_price();
+        if ($stock_price <= 0) $stock_price = $default_price;
+        if ($daily_price <= 0) $daily_price = $default_price;
+        if ($vor_price <= 0) $vor_price = $default_price;
 
         $products[] = [
-            'id' => get_the_ID(),
+            'id' => $product_id,
             'sku' => $product->get_sku() ?: '',
             'name' => get_the_title(),
-            'price' => (float) $product->get_price(),
             'stock' => (int) $product->get_stock_quantity(),
             'category' => !empty($categories) ? $categories[0] : 'Uncategorized',
+            'prices' => [
+                'stock_order' => $stock_price,
+                'daily_order' => $daily_price,
+                'vor_order' => $vor_price,
+            ],
         ];
     }
 
@@ -235,9 +251,96 @@ function dealer_get_inventory_data() {
         'products' => $products,
         'cartUrl' => wc_get_cart_url(),
         'nonce' => wp_create_nonce('wc_store_api'),
-        'ajaxUrl' => admin_url('admin-ajax.php')
+        'ajaxUrl' => admin_url('admin-ajax.php'),
+        'addToCartNonce' => wp_create_nonce('dealer_add_to_cart')
     ];
 }
+
+/**
+ * AJAX handler for adding product to cart with order type
+ */
+add_action('wp_ajax_dealer_add_to_cart', function() {
+    check_ajax_referer('dealer_add_to_cart', 'nonce');
+
+    $product_id = intval($_POST['product_id']);
+    $quantity = intval($_POST['quantity']);
+    $order_type = sanitize_text_field($_POST['order_type']);
+
+    if ($quantity <= 0) $quantity = 1;
+
+    // Validate order type
+    $valid_types = ['stock_order', 'daily_order', 'vor_order'];
+    if (!in_array($order_type, $valid_types)) {
+        $order_type = 'stock_order';
+    }
+
+    // Get the price for this order type
+    $price_key = '_' . $order_type . '_price';
+    $price = (float) get_post_meta($product_id, $price_key, true);
+
+    if ($price <= 0) {
+        $product = wc_get_product($product_id);
+        $price = $product ? (float) $product->get_price() : 0;
+    }
+
+    // Add to cart with custom data
+    $cart_item_data = [
+        'dealer_order_type' => $order_type,
+        'dealer_custom_price' => $price,
+    ];
+
+    $cart_item_key = WC()->cart->add_to_cart($product_id, $quantity, 0, [], $cart_item_data);
+
+    if ($cart_item_key) {
+        wp_send_json_success([
+            'message' => 'Product added to cart',
+            'cart_count' => WC()->cart->get_cart_contents_count(),
+            'cart_item_key' => $cart_item_key
+        ]);
+    } else {
+        wp_send_json_error(['message' => 'Could not add product to cart']);
+    }
+});
+
+/**
+ * Apply custom price from order type
+ */
+add_action('woocommerce_before_calculate_totals', function($cart) {
+    if (is_admin() && !defined('DOING_AJAX')) return;
+
+    foreach ($cart->get_cart() as $cart_item) {
+        if (isset($cart_item['dealer_custom_price']) && $cart_item['dealer_custom_price'] > 0) {
+            $cart_item['data']->set_price($cart_item['dealer_custom_price']);
+        }
+    }
+}, 20);
+
+/**
+ * Display order type in cart
+ */
+add_filter('woocommerce_get_item_data', function($item_data, $cart_item) {
+    if (isset($cart_item['dealer_order_type'])) {
+        $type_labels = [
+            'stock_order' => 'Stock Order',
+            'daily_order' => 'Daily Order',
+            'vor_order' => 'VOR Order',
+        ];
+        $item_data[] = [
+            'key' => 'Order Type',
+            'value' => $type_labels[$cart_item['dealer_order_type']] ?? $cart_item['dealer_order_type'],
+        ];
+    }
+    return $item_data;
+}, 10, 2);
+
+/**
+ * Save order type to order item meta
+ */
+add_action('woocommerce_checkout_create_order_line_item', function($item, $cart_item_key, $values) {
+    if (isset($values['dealer_order_type'])) {
+        $item->add_meta_data('_dealer_order_type', $values['dealer_order_type'], true);
+    }
+}, 10, 3);
 
 /**
  * Get cart data for React
@@ -250,17 +353,28 @@ function dealer_get_cart_data() {
         $cart = WC()->cart;
     }
 
+    $type_labels = [
+        'stock_order' => 'Stock Order',
+        'daily_order' => 'Daily Order',
+        'vor_order' => 'VOR Order',
+    ];
+
     if ($cart) {
         foreach ($cart->get_cart() as $cart_key => $cart_item) {
             $product = $cart_item['data'];
+            $order_type = $cart_item['dealer_order_type'] ?? 'stock_order';
+            $custom_price = $cart_item['dealer_custom_price'] ?? (float) $product->get_price();
+
             $items[] = [
                 'key' => $cart_key,
                 'id' => $cart_item['product_id'],
                 'name' => $product->get_name(),
                 'sku' => $product->get_sku() ?: '',
-                'price' => (float) $product->get_price(),
+                'price' => (float) $custom_price,
                 'quantity' => $cart_item['quantity'],
-                'subtotal' => (float) $cart_item['line_subtotal'],
+                'subtotal' => (float) $custom_price * $cart_item['quantity'],
+                'orderType' => $order_type,
+                'orderTypeLabel' => $type_labels[$order_type] ?? 'Stock Order',
             ];
         }
     }
@@ -283,6 +397,7 @@ function dealer_get_orders_data() {
 
     if ($user_id) {
         $customer_orders = wc_get_orders([
+            'status' => ['pending', 'processing', 'on-hold', 'completed', 'cancelled', 'refunded', 'failed'],
             'customer_id' => $user_id,
             'limit' => 20,
             'orderby' => 'date',
@@ -363,6 +478,15 @@ add_shortcode('dealer_orders', function () {
 /**
  * Hide theme elements and set white background
  */
+// Disable caching for dealer pages
+add_action("send_headers", function() {
+    if (is_page("login") || is_page("inventory") || is_page("cart") || is_wc_endpoint_url("orders")) {
+        header("Cache-Control: no-cache, no-store, must-revalidate");
+        header("Pragma: no-cache");
+        header("Expires: 0");
+    }
+});
+
 add_action('wp_head', function () {
     if (is_admin()) {
         return;
@@ -460,10 +584,7 @@ add_action('wp_head', function () {
         }
 
         /* React root containers - centered flexbox */
-        #dealer-login-root,
-        #dealer-inventory-root,
-        #dealer-cart-root,
-        #dealer-orders-root {
+        #dealer-login-root {
             min-height: 100vh;
             width: 100% !important;
             max-width: 100vw !important;
@@ -474,13 +595,32 @@ add_action('wp_head', function () {
             overflow-x: hidden !important;
         }
 
+        #dealer-inventory-root,
+        #dealer-cart-root,
+        #dealer-orders-root {
+            min-height: 100vh;
+            width: 80vw !important;
+            max-width: 80vw !important;
+            margin: 0 auto !important;
+            padding-top: 120px !important;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            box-sizing: border-box;
+            overflow-x: hidden !important;
+        }
+
         /* Ensure children of root containers are constrained */
-        #dealer-login-root > div,
+        #dealer-login-root > div {
+            width: 100% !important;
+            max-width: 100vw !important;
+            box-sizing: border-box !important;
+        }
+
         #dealer-inventory-root > div,
         #dealer-cart-root > div,
         #dealer-orders-root > div {
             width: 100% !important;
-            max-width: 100vw !important;
             box-sizing: border-box !important;
         }
     </style>

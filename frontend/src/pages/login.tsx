@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { motion } from 'framer-motion'
 import LightRays from '@/components/backgrounds/LightRays'
 import { Button } from '@/components/ui/Button'
+import { Input } from '@/components/ui/Input'
 import '@/index.css'
 
 declare global {
@@ -46,7 +47,7 @@ function LoginPage() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5 }}
       >
-        <div className="bg-white/10 backdrop-blur-2xl rounded-3xl p-8 border border-white/10">
+        <div className="rounded-3xl p-8">
           {/* Logo / Title */}
           <motion.div
             className="text-center mb-8"
@@ -78,13 +79,13 @@ function LoginPage() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.3 }}
             >
-              <input
+              <Input
                 type="text"
                 name="username"
                 placeholder="Username or Email"
                 required
                 autoComplete="username"
-                className="w-full h-11 rounded-xl bg-white/10 border border-white/10 px-4 text-sm text-white placeholder:text-gray-500 focus:bg-white/15 focus:border-white/20 focus:outline-none transition-all"
+                className="bg-white/10 border border-white/10 text-white placeholder:text-gray-500 focus:bg-white/15 focus:border-white/20"
               />
             </motion.div>
 
@@ -93,13 +94,13 @@ function LoginPage() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.4 }}
             >
-              <input
+              <Input
                 type="password"
                 name="password"
                 placeholder="Password"
                 required
                 autoComplete="current-password"
-                className="w-full h-11 rounded-xl bg-white/10 border border-white/10 px-4 text-sm text-white placeholder:text-gray-500 focus:bg-white/15 focus:border-white/20 focus:outline-none transition-all"
+                className="bg-white/10 border border-white/10 text-white placeholder:text-gray-500 focus:bg-white/15 focus:border-white/20"
               />
             </motion.div>
 
@@ -107,11 +108,11 @@ function LoginPage() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.5 }}
-              className="pt-4"
             >
               <Button
                 type="submit"
-                className="w-full h-11 text-sm font-medium bg-white text-black hover:bg-gray-100"
+                variant="dark"
+                className="w-full h-11 my-5"
               >
                 Sign In
               </Button>

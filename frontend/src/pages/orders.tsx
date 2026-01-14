@@ -55,8 +55,8 @@ function OrdersPage() {
   }
 
   return (
-    <div className="min-h-screen bg-white pt-32 pb-20 px-6">
-      <div className="w-full max-w-5xl mx-auto box-border">
+    <div className="min-h-screen bg-white pb-20">
+      <div className="w-full box-border">
         {/* Header */}
         <motion.div
           className="mb-8 text-center"

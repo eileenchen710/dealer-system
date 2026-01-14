@@ -11,9 +11,21 @@ interface Product {
   id: number
   sku: string
   name: string
-  price: number
   stock: number
   category: string
+  prices: {
+    stock_order: number
+    daily_order: number
+    vor_order: number
+  }
+}
+
+type OrderType = 'stock_order' | 'daily_order' | 'vor_order'
+
+const ORDER_TYPE_LABELS: Record<OrderType, string> = {
+  stock_order: 'Stock Order',
+  daily_order: 'Daily Order',
+  vor_order: 'VOR Order',
 }
 
 declare global {
@@ -23,6 +35,7 @@ declare global {
       cartUrl: string
       nonce: string
       ajaxUrl: string
+      addToCartNonce: string
     }
   }
 }
@@ -32,11 +45,13 @@ function InventoryPage() {
     products: [],
     cartUrl: '/cart/',
     nonce: '',
-    ajaxUrl: ''
+    ajaxUrl: '',
+    addToCartNonce: ''
   }
 
   const [search, setSearch] = useState('')
   const [quantities, setQuantities] = useState<Record<number, number>>({})
+  const [orderTypes, setOrderTypes] = useState<Record<number, OrderType>>({})
   const [addingToCart, setAddingToCart] = useState<number | null>(null)
 
   const filteredProducts = useMemo(() => {
@@ -57,32 +72,48 @@ function InventoryPage() {
     setQuantities(prev => ({ ...prev, [productId]: value }))
   }
 
+  const handleOrderTypeChange = (productId: number, value: OrderType) => {
+    setOrderTypes(prev => ({ ...prev, [productId]: value }))
+  }
+
   const handleAddToCart = async (product: Product) => {
     const quantity = quantities[product.id] || 1
+    const orderType = orderTypes[product.id] || 'stock_order'
     setAddingToCart(product.id)
 
     try {
       const formData = new FormData()
-      formData.append('add-to-cart', String(product.id))
+      formData.append('action', 'dealer_add_to_cart')
+      formData.append('nonce', config.addToCartNonce)
+      formData.append('product_id', String(product.id))
       formData.append('quantity', String(quantity))
+      formData.append('order_type', orderType)
 
-      await fetch(config.cartUrl, {
+      const response = await fetch(config.ajaxUrl, {
         method: 'POST',
         body: formData,
       })
 
-      // Reload to update cart count
-      window.location.reload()
+      const result = await response.json()
+
+      if (result.success) {
+        // Reload to update cart count
+        window.location.reload()
+      } else {
+        console.error('Failed to add to cart:', result.data?.message)
+        alert('Failed to add to cart: ' + (result.data?.message || 'Unknown error'))
+      }
     } catch (error) {
       console.error('Failed to add to cart:', error)
+      alert('Failed to add to cart')
     } finally {
       setAddingToCart(null)
     }
   }
 
   return (
-    <div className="min-h-screen bg-white pt-32 pb-20 px-6">
-      <div className="w-full max-w-5xl mx-auto box-border">
+    <div className="min-h-screen bg-white pb-20">
+      <div className="w-full box-border">
         {/* Header */}
         <motion.div
           className="mb-8 text-center"
@@ -126,9 +157,9 @@ function InventoryPage() {
                 <TableHead>SKU</TableHead>
                 <TableHead>Product</TableHead>
                 <TableHead>Category</TableHead>
-                <TableHead className="text-right">Price</TableHead>
                 <TableHead className="text-right">Stock</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>Type</TableHead>
                 <TableHead className="text-right">Order</TableHead>
               </TableRow>
             </TableHeader>
@@ -136,6 +167,7 @@ function InventoryPage() {
               <AnimatePresence>
                 {filteredProducts.map((product, index) => {
                   const status = getStockStatus(product.stock)
+                  const selectedType = orderTypes[product.id] || 'stock_order'
                   return (
                     <motion.tr
                       key={product.id}
@@ -150,12 +182,24 @@ function InventoryPage() {
                       </TableCell>
                       <TableCell className="font-medium text-gray-900">{product.name}</TableCell>
                       <TableCell className="text-gray-500">{product.category}</TableCell>
-                      <TableCell className="text-right text-gray-900">${product.price.toFixed(2)}</TableCell>
                       <TableCell className="text-right text-gray-700">{product.stock ?? 'N/A'}</TableCell>
                       <TableCell>
                         <span className={`font-medium ${status.className}`}>
                           {status.text}
                         </span>
+                      </TableCell>
+                      <TableCell>
+                        <select
+                          value={selectedType}
+                          onChange={(e) => handleOrderTypeChange(product.id, e.target.value as OrderType)}
+                          className="h-8 px-2 text-sm border border-gray-200 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent"
+                        >
+                          {Object.entries(ORDER_TYPE_LABELS).map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
                       </TableCell>
                       <TableCell className="text-right">
                         {product.stock > 0 ? (

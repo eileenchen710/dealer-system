@@ -383,6 +383,8 @@ add_action('wp_head', function () {
         html, body {
             background-color: #fff !important;
             color: #111827 !important;
+            overflow-x: hidden !important;
+            max-width: 100vw !important;
         }
 
         /* Hide ALL theme elements */
@@ -427,19 +429,23 @@ add_action('wp_head', function () {
         #content,
         .content-area,
         article,
-        .entry-content {
+        .entry-content,
+        .woocommerce,
+        .woocommerce-page {
             width: 100% !important;
-            max-width: 100% !important;
+            max-width: 100vw !important;
             float: none !important;
             padding: 0 !important;
             margin: 0 !important;
             background: transparent !important;
             box-sizing: border-box !important;
+            overflow-x: hidden !important;
         }
 
         /* Fix WooCommerce account page layout */
         .woocommerce-account .woocommerce-MyAccount-content {
             width: 100% !important;
+            max-width: 100vw !important;
             float: none !important;
             padding: 0 !important;
             margin: 0 !important;
@@ -459,19 +465,23 @@ add_action('wp_head', function () {
         #dealer-cart-root,
         #dealer-orders-root {
             min-height: 100vh;
-            width: 100%;
+            width: 100% !important;
+            max-width: 100vw !important;
             display: flex;
             flex-direction: column;
             align-items: center;
             box-sizing: border-box;
+            overflow-x: hidden !important;
         }
 
-        /* Ensure children of root containers take full width */
+        /* Ensure children of root containers are constrained */
         #dealer-login-root > div,
         #dealer-inventory-root > div,
         #dealer-cart-root > div,
         #dealer-orders-root > div {
-            width: 100%;
+            width: 100% !important;
+            max-width: 100vw !important;
+            box-sizing: border-box !important;
         }
     </style>
     <?php

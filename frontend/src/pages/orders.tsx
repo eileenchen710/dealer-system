@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client'
 import { motion, AnimatePresence } from 'framer-motion'
 import GradientText from '@/components/ui/GradientText'
 import { Button } from '@/components/ui/Button'
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/Table'
 import '@/index.css'
 
 interface OrderItem {
@@ -56,8 +55,8 @@ function OrdersPage() {
   }
 
   return (
-    <div className="min-h-screen bg-white py-8 px-6">
-      <div className="max-w-5xl mx-auto">
+    <div className="min-h-screen bg-white pt-16 pb-20 px-8 md:px-12 lg:px-16">
+      <div className="max-w-4xl mx-auto">
         {/* Header */}
         <motion.div
           className="mb-8 text-center"
@@ -77,7 +76,7 @@ function OrdersPage() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 }}
-            className="space-y-4"
+            className="space-y-3"
           >
             {config.orders.map((order, index) => (
               <motion.div
@@ -85,31 +84,36 @@ function OrdersPage() {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: index * 0.05 }}
-                className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm"
+                className="bg-gray-50 rounded-2xl overflow-hidden"
               >
                 {/* Order Header */}
                 <div
-                  className="p-4 flex flex-wrap items-center justify-between gap-4 cursor-pointer hover:bg-gray-50 transition-colors"
+                  className="p-5 flex items-center justify-between cursor-pointer hover:bg-gray-100/80 transition-colors"
                   onClick={() => toggleOrder(order.id)}
                 >
-                  <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-5">
+                    <div className="w-12 h-12 rounded-xl bg-white flex items-center justify-center shadow-sm">
+                      <span className="text-lg">📦</span>
+                    </div>
                     <div>
-                      <span className="text-gray-600 font-mono">#{order.number}</span>
-                      <p className="text-sm text-gray-400">{order.date}</p>
+                      <div className="flex items-center gap-3">
+                        <span className="font-semibold text-gray-900">Order #{order.number}</span>
+                        <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusStyle(order.status)}`}>
+                          {order.status}
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-500 mt-0.5">{order.date}</p>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-4">
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium border ${getStatusStyle(order.status)}`}>
-                      {order.status}
-                    </span>
-                    <span className="text-lg font-semibold text-gray-900">${order.total.toFixed(2)}</span>
-                    <motion.span
+                    <span className="text-xl font-bold text-gray-900">${order.total.toFixed(2)}</span>
+                    <motion.div
                       animate={{ rotate: expandedOrder === order.id ? 180 : 0 }}
-                      className="text-gray-400"
+                      className="w-8 h-8 rounded-full bg-white shadow-sm flex items-center justify-center"
                     >
-                      ▼
-                    </motion.span>
+                      <span className="text-gray-400 text-sm">▼</span>
+                    </motion.div>
                   </div>
                 </div>
 
@@ -120,36 +124,32 @@ function OrdersPage() {
                       initial={{ height: 0, opacity: 0 }}
                       animate={{ height: 'auto', opacity: 1 }}
                       exit={{ height: 0, opacity: 0 }}
-                      transition={{ duration: 0.2 }}
-                      className="border-t border-gray-200"
+                      transition={{ duration: 0.25, ease: 'easeInOut' }}
+                      className="overflow-hidden"
                     >
-                      <div className="p-4">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Product</TableHead>
-                              <TableHead className="text-center">Qty</TableHead>
-                              <TableHead className="text-right">Total</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
+                      <div className="px-5 pb-5">
+                        <div className="bg-white rounded-xl p-4">
+                          {/* Items List */}
+                          <div className="space-y-3">
                             {order.items.map((item, itemIndex) => (
-                              <TableRow key={itemIndex}>
-                                <TableCell className="text-gray-900">{item.name}</TableCell>
-                                <TableCell className="text-center text-gray-700">{item.quantity}</TableCell>
-                                <TableCell className="text-right text-gray-900">${item.total.toFixed(2)}</TableCell>
-                              </TableRow>
+                              <div
+                                key={itemIndex}
+                                className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0"
+                              >
+                                <div className="flex-1">
+                                  <p className="text-gray-900 font-medium">{item.name}</p>
+                                  <p className="text-sm text-gray-500">Qty: {item.quantity}</p>
+                                </div>
+                                <span className="font-semibold text-gray-900">${item.total.toFixed(2)}</span>
+                              </div>
                             ))}
-                          </TableBody>
-                        </Table>
+                          </div>
 
-                        <div className="mt-4 flex justify-between items-center pt-4 border-t border-gray-200">
-                          <span className="text-gray-500">Order Total</span>
-                          <span className="text-xl font-bold">
-                            <GradientText animationSpeed={4}>
-                              ${order.total.toFixed(2)}
-                            </GradientText>
-                          </span>
+                          {/* Total */}
+                          <div className="mt-4 pt-4 border-t border-gray-200 flex justify-between items-center">
+                            <span className="text-gray-500 font-medium">Total</span>
+                            <span className="text-2xl font-bold text-gray-900">${order.total.toFixed(2)}</span>
+                          </div>
                         </div>
                       </div>
                     </motion.div>

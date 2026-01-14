@@ -81,8 +81,8 @@ function InventoryPage() {
   }
 
   return (
-    <div className="min-h-screen bg-white py-8 px-6">
-      <div className="max-w-6xl mx-auto">
+    <div className="min-h-screen bg-white pt-16 pb-20 px-8 md:px-12 lg:px-16">
+      <div className="max-w-7xl mx-auto">
         {/* Header */}
         <motion.div
           className="mb-8 text-center"

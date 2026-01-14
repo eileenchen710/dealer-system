@@ -471,17 +471,22 @@ add_action('wp_body_open', function () {
             background: rgba(255, 255, 255, 0.5);
             backdrop-filter: blur(20px) saturate(180%);
             -webkit-backdrop-filter: blur(20px) saturate(180%);
-            border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.8);
             color: #111827;
-            padding: 12px 24px;
+            padding: 10px 24px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 50vw;
+            min-width: 600px;
+            max-width: 900px;
+            border-radius: 9999px;
             z-index: 9999;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
         }
         .dealer-header-bar a {
             color: #374151;
@@ -525,7 +530,7 @@ add_action('wp_body_open', function () {
         }
         /* Add top padding to body for fixed header */
         body {
-            padding-top: 56px !important;
+            padding-top: 0 !important;
         }
     </style>
     <div class="dealer-header-bar">

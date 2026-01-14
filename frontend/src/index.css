@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+:root {
+  --gray-primary: #374151;
+  --gray-light: #9ca3af;
+  --gray-dark: #1f2937;
+  --background: #ffffff;
+  --foreground: #111827;
+  --card: #ffffff;
+  --card-foreground: #111827;
+  --border: #e5e7eb;
+  --input: #f3f4f6;
+  --ring: #374151;
+  --radius: 0.5rem;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+::-webkit-scrollbar {
+  display: none;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  font-size: 14px;
+  min-height: 100vh;
+}
+
+/* Animated gradient text - gray/white */
+.gradient-text {
+  font-weight: 600;
+  letter-spacing: -2px;
+  background: linear-gradient(135deg, #111827, #6b7280, #9ca3af, #374151, #6b7280, #111827);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: gradientShift 4s ease-in-out infinite;
+  display: inline-block;
+}
+
+@keyframes gradientShift {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+/* Selection */
+::selection {
+  background: rgba(55, 65, 81, 0.3);
+  color: #111827;
+}
+
+/* Glow effect */
+.glow {
+  box-shadow: 0 0 40px rgba(55, 65, 81, 0.15);
+}
+
+.glow-text {
+  text-shadow: 0 0 40px rgba(107, 114, 128, 0.3);
+}
+
+/* Focus styles */
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--gray-primary);
+  box-shadow: 0 0 0 2px rgba(55, 65, 81, 0.1);
+}
+
+/* Stock status */
+.stock-in {
+  color: #16a34a;
+}
+
+.stock-low {
+  color: #ca8a04;
+}
+
+.stock-out {
+  color: #dc2626;
+}

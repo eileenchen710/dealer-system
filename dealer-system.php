@@ -150,7 +150,7 @@ add_action('wp_enqueue_scripts', function () {
     }
 
     // Common styles
-    wp_enqueue_style('dealer-react-styles', $dist_url . 'css/style.css', [], '2.0.0');
+    wp_enqueue_style('dealer-react-styles', $dist_url . 'css/style.css', [], '2.0.1');
 
     // Page-specific scripts (ES modules)
     if (is_page('login') && !is_user_logged_in()) {

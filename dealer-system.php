@@ -157,7 +157,7 @@ add_action('wp_enqueue_scripts', function () {
         wp_enqueue_script('dealer-login', $dist_url . 'js/login.js', [], '2.0.0', true);
         wp_localize_script('dealer-login', 'dealerLogin', [
             'loginUrl' => wc_get_page_permalink('myaccount'),
-            'nonce' => wp_create_nonce('woocommerce-login-nonce'),
+            'nonce' => wp_create_nonce('woocommerce-login'),
             'redirect' => home_url('/')
         ]);
     }

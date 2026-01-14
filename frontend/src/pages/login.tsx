@@ -48,7 +48,7 @@ function LoginPage() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5 }}
       >
-        <div className="bg-white/70 backdrop-blur-2xl rounded-3xl p-8 shadow-[0_8px_32px_rgba(0,0,0,0.08)]">
+        <div className="bg-white/80 backdrop-blur-2xl rounded-3xl p-8">
           {/* Logo / Title */}
           <motion.div
             className="text-center mb-8"
@@ -107,7 +107,7 @@ function LoginPage() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.5 }}
-              className="pt-2"
+              className="pt-4"
             >
               <Button
                 type="submit"

@@ -2,7 +2,6 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { motion } from 'framer-motion'
 import LightRays from '@/components/backgrounds/LightRays'
-import GradientText from '@/components/ui/GradientText'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import '@/index.css'
@@ -56,12 +55,12 @@ function LoginPage() {
             animate={{ opacity: 1 }}
             transition={{ delay: 0.2 }}
           >
-            <h1 className="text-2xl font-semibold mb-1">
-              <GradientText animationSpeed={4}>
-                ZEEKR Dealer
-              </GradientText>
-            </h1>
-            <p className="text-gray-400 text-sm">Sign in to continue</p>
+            <img
+              src="/wp-content/plugins/dealer-system/dist/public/ZEEKR_black.png"
+              alt="ZEEKR"
+              className="h-8 mx-auto mb-3"
+            />
+            <p className="text-gray-400 text-sm">Dealer Portal</p>
           </motion.div>
 
           {/* Login Form */}

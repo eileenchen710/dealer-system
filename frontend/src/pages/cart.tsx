@@ -79,8 +79,8 @@ function CartPage() {
   }
 
   return (
-    <div className="min-h-screen bg-white pt-28 pb-20 px-6">
-      <div className="w-full max-w-5xl mx-auto">
+    <div className="min-h-screen bg-white pt-32 pb-20 px-6">
+      <div className="w-full max-w-5xl mx-auto box-border">
         {/* Header */}
         <motion.div
           className="mb-8 text-center"

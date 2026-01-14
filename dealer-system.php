@@ -370,7 +370,15 @@ add_action('wp_head', function () {
     ?>
     <link rel="icon" type="image/x-icon" href="<?php echo DEALER_SYSTEM_URL; ?>dist/ZEEKR_black.ico">
     <link rel="shortcut icon" href="<?php echo DEALER_SYSTEM_URL; ?>dist/ZEEKR_black.ico">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
+        /* Figtree font */
+        html, body, * {
+            font-family: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+        }
+
         /* Light theme base */
         html, body {
             background-color: #fff !important;
@@ -407,30 +415,34 @@ add_action('wp_head', function () {
             display: none !important;
         }
 
-        /* Full width content */
+        /* Full width content - reset all containers */
+        .site-content,
         .site-content .content-area,
         .has-sidebar .site-content .content-area,
         #primary,
         .site-main,
         .container,
         .grid-container,
-        .inside-article {
+        .inside-article,
+        #content,
+        .content-area,
+        article,
+        .entry-content {
             width: 100% !important;
             max-width: 100% !important;
             float: none !important;
             padding: 0 !important;
             margin: 0 !important;
             background: transparent !important;
+            box-sizing: border-box !important;
         }
 
-        .site-content,
-        #content,
-        .content-area,
-        article,
-        .entry-content {
+        /* Fix WooCommerce account page layout */
+        .woocommerce-account .woocommerce-MyAccount-content {
+            width: 100% !important;
+            float: none !important;
             padding: 0 !important;
             margin: 0 !important;
-            background: transparent !important;
         }
 
         /* Hide WooCommerce elements on login */
@@ -441,12 +453,25 @@ add_action('wp_head', function () {
             display: none !important;
         }
 
-        /* React root containers */
+        /* React root containers - centered flexbox */
         #dealer-login-root,
         #dealer-inventory-root,
         #dealer-cart-root,
         #dealer-orders-root {
             min-height: 100vh;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            box-sizing: border-box;
+        }
+
+        /* Ensure children of root containers take full width */
+        #dealer-login-root > div,
+        #dealer-inventory-root > div,
+        #dealer-cart-root > div,
+        #dealer-orders-root > div {
+            width: 100%;
         }
     </style>
     <?php
@@ -486,7 +511,7 @@ add_action('wp_body_open', function () {
             max-width: 900px;
             border-radius: 9999px;
             z-index: 9999;
-            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
         }
         .dealer-header-bar a {
             color: #374151;

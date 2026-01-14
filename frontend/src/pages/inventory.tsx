@@ -81,8 +81,8 @@ function InventoryPage() {
   }
 
   return (
-    <div className="min-h-screen bg-white pt-28 pb-20 px-6">
-      <div className="w-full max-w-5xl mx-auto">
+    <div className="min-h-screen bg-white pt-32 pb-20 px-6">
+      <div className="w-full max-w-5xl mx-auto box-border">
         {/* Header */}
         <motion.div
           className="mb-8 text-center"
@@ -99,7 +99,7 @@ function InventoryPage() {
 
         {/* Search */}
         <motion.div
-          className="mb-6 flex justify-center"
+          className="mb-8 flex justify-center"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}

@@ -3816,7 +3816,7 @@ add_action('wp_ajax_zeekr_get_orders', function() {
     $excluded_statuses = ['checkout-draft', 'auto-draft', 'trash', 'draft'];
 
     $args = [
-        'limit' => 100,
+        'limit' => !empty($search) ? -1 : 100,
         'orderby' => 'date',
         'order' => 'DESC',
         'type' => 'shop_order',
@@ -3836,6 +3836,23 @@ add_action('wp_ajax_zeekr_get_orders', function() {
     }
 
     $orders = wc_get_orders($args);
+
+    // If searching by order ID (e.g. "ZAU3791" or "3791") and nothing matched above,
+    // fall back to a direct order lookup in case the order status is outside the queried set.
+    if (!empty($search)) {
+        $clean_search = preg_replace('/^ZAU/i', '', $search);
+        if (ctype_digit($clean_search)) {
+            $direct = wc_get_order((int) $clean_search);
+            if ($direct && $direct->get_type() === 'shop_order' && !in_array($direct->get_status(), $excluded_statuses)) {
+                $found = false;
+                foreach ($orders as $o) {
+                    if ($o->get_id() === $direct->get_id()) { $found = true; break; }
+                }
+                if (!$found) $orders[] = $direct;
+            }
+        }
+    }
+
     $order_data = [];
 
     foreach ($orders as $order) {
@@ -6321,7 +6338,8 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
     $dealer_ids = isset($_POST['dealer_ids']) ? array_map('intval', (array) $_POST['dealer_ids']) : [];
     $search = isset($_POST['search']) ? sanitize_text_field($_POST['search']) : '';
     $page = isset($_POST['page']) ? max(1, intval($_POST['page'])) : 1;
-    $per_page = 50;
+    // per_page <= 0 means "return all rows" (used by CSV export)
+    $per_page = isset($_POST['per_page']) ? intval($_POST['per_page']) : 50;
 
     // Parse dates in WP timezone
     $wp_tz = new DateTimeZone(wp_timezone_string());
@@ -6371,6 +6389,7 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
     $products_info = []; // product_id => [id, name, sku]
     $daily_sold = [];    // product_id => [date => qty_sold]
     $future_sold = [];   // product_id => total sold after date range
+    $daily_new_stock = []; // product_id => [date => qty_added] (fresh stock from adjustments / PO receives)
 
     // Process orders in the date range
     foreach ($orders as $order) {
@@ -6472,9 +6491,64 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
         }
     }
 
+    // Build per-product, per-day fresh-stock map from stock_adj_log
+    // (logs positive deltas only; excludes reserve adjustments)
+    $adj_logs = get_posts([
+        'post_type'      => 'stock_adj_log',
+        'posts_per_page' => -1,
+        'date_query'     => [
+            [
+                'after'     => $local_after . ' 00:00:00',
+                'before'    => $local_before . ' 23:59:59',
+                'inclusive' => true,
+            ],
+        ],
+    ]);
+
+    foreach ($adj_logs as $log) {
+        $type = get_post_meta($log->ID, '_sal_type', true);
+        if ($type === 'reserve') continue;
+
+        $product_id = (int) get_post_meta($log->ID, '_sal_product_id', true);
+        if (!$product_id) continue;
+
+        $old_qty = (int) get_post_meta($log->ID, '_sal_old_qty', true);
+        $new_qty = (int) get_post_meta($log->ID, '_sal_new_qty', true);
+        $delta   = $new_qty - $old_qty;
+        if ($delta <= 0) continue;
+
+        $log_dt = new DateTime($log->post_date, $wp_tz);
+        $day = $log_dt->format('Y-m-d');
+        if ($day < $local_after || $day > $local_before) continue;
+
+        // Make sure the product is included in the result, even if it had no sales
+        if (!isset($products_info[$product_id])) {
+            $product = wc_get_product($product_id);
+            if (!$product) continue;
+            $products_info[$product_id] = [
+                'id' => $product_id,
+                'name' => $product->get_name(),
+                'sku' => $product->get_sku(),
+                'current_stock' => (int) $product->get_stock_quantity(),
+                'reserved_qty' => (int) get_post_meta($product_id, '_reserved_qty', true),
+            ];
+            $daily_sold[$product_id] = [];
+            $future_sold[$product_id] = 0;
+        }
+
+        if (!isset($daily_new_stock[$product_id])) {
+            $daily_new_stock[$product_id] = [];
+        }
+        if (!isset($daily_new_stock[$product_id][$day])) {
+            $daily_new_stock[$product_id][$day] = 0;
+        }
+        $daily_new_stock[$product_id][$day] += $delta;
+    }
+
     // Build result: for each product, compute SOH per day
     $result = [];
     $global_total_sold = 0;
+    $global_total_new_stock = 0;
 
     foreach ($products_info as $product_id => $info) {
         // Apply search filter
@@ -6495,10 +6569,13 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
             $total_sold_in_range += isset($product_daily_sold[$d]) ? $product_daily_sold[$d] : 0;
         }
 
+        $product_daily_new = isset($daily_new_stock[$product_id]) ? $daily_new_stock[$product_id] : [];
+
         // For each day, SOH = current_stock + future_sold + (sold in range after this day)
         $cumulative_sold = 0;
         foreach ($dates as $d) {
             $sold_today = isset($product_daily_sold[$d]) ? $product_daily_sold[$d] : 0;
+            $new_stock_today = isset($product_daily_new[$d]) ? $product_daily_new[$d] : 0;
             $cumulative_sold += $sold_today;
             $sold_after_this_day = ($total_sold_in_range - $cumulative_sold) + $product_future_sold;
             $soh = $current_stock + $sold_after_this_day;
@@ -6507,11 +6584,14 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
                 'date' => $d,
                 'qty_sold' => $sold_today,
                 'soh' => $soh,
+                'new_stock' => $new_stock_today,
             ];
         }
 
         $total_sold = array_sum(array_column($days_data, 'qty_sold'));
+        $total_new_stock = array_sum(array_column($days_data, 'new_stock'));
         $global_total_sold += $total_sold;
+        $global_total_new_stock += $total_new_stock;
 
         $result[] = [
             'id' => $product_id,
@@ -6520,6 +6600,7 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
             'current_stock' => $current_stock,
             'reserved_qty' => isset($info['reserved_qty']) ? $info['reserved_qty'] : 0,
             'total_sold' => $total_sold,
+            'total_new_stock' => $total_new_stock,
             'days' => $days_data,
         ];
     }
@@ -6533,9 +6614,18 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
     });
 
     $total_products = count($result);
-    $total_pages = max(1, ceil($total_products / $per_page));
-    $page = min($page, $total_pages);
-    $paged_result = array_slice($result, ($page - 1) * $per_page, $per_page);
+    if ($per_page <= 0) {
+        // Return all rows (CSV export mode)
+        $paged_result = $result;
+        $page = 1;
+        $total_pages = 1;
+        $effective_per_page = $total_products;
+    } else {
+        $total_pages = max(1, ceil($total_products / $per_page));
+        $page = min($page, $total_pages);
+        $paged_result = array_slice($result, ($page - 1) * $per_page, $per_page);
+        $effective_per_page = $per_page;
+    }
 
     wp_send_json_success([
         'products' => $paged_result,
@@ -6543,10 +6633,11 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
         'totals' => [
             'products_count' => $total_products,
             'total_sold' => $global_total_sold,
+            'total_new_stock' => $global_total_new_stock,
         ],
         'pagination' => [
             'page' => $page,
-            'per_page' => $per_page,
+            'per_page' => $effective_per_page,
             'total' => $total_products,
             'total_pages' => $total_pages,
         ],
@@ -8277,7 +8368,7 @@ add_action('wp_ajax_warehouse_get_orders', function() {
     $allowed_statuses = ['received', 'processing', 'completed', 'partial-refund', 'refunded'];
 
     $args = [
-        'limit' => 100,
+        'limit' => !empty($search) ? -1 : 100,
         'orderby' => 'date',
         'order' => 'DESC',
         'type' => 'shop_order',
@@ -8291,6 +8382,22 @@ add_action('wp_ajax_warehouse_get_orders', function() {
     }
 
     $orders = wc_get_orders($args);
+
+    // Direct order ID lookup fallback (e.g. "ZAU3791") in case status filter excludes it
+    if (!empty($search)) {
+        $clean_search = preg_replace('/^ZAU/i', '', $search);
+        if (ctype_digit($clean_search)) {
+            $direct = wc_get_order((int) $clean_search);
+            if ($direct && $direct->get_type() === 'shop_order' && in_array($direct->get_status(), $allowed_statuses)) {
+                $found = false;
+                foreach ($orders as $o) {
+                    if ($o->get_id() === $direct->get_id()) { $found = true; break; }
+                }
+                if (!$found) $orders[] = $direct;
+            }
+        }
+    }
+
     $order_data = [];
 
     foreach ($orders as $order) {
@@ -9149,11 +9256,33 @@ add_action('wp_ajax_warehouse_receive_stock', function() {
         'received_at'  => $received_at,
     ], ['id' => $po_id]);
 
+    // Capture old stock BEFORE we increase it so the audit log delta is correct
+    $product = wc_get_product($po->product_id);
+    $old_stock = $product ? (int) $product->get_stock_quantity() : 0;
+
     // Update WooCommerce stock
     wc_update_product_stock($po->product_id, $qty_received, 'increase');
 
     $product = wc_get_product($po->product_id);
     $new_soh = $product ? $product->get_stock_quantity() : '?';
+
+    // Log to stock_adj_log so PO receipts surface in the SOH "New Stock" report
+    if ($product) {
+        wp_insert_post([
+            'post_type'   => 'stock_adj_log',
+            'post_status' => 'publish',
+            'post_title'  => sprintf('PO receive: %s (%s)', $product->get_sku(), $product->get_name()),
+            'meta_input'  => [
+                '_sal_product_id'   => (int) $po->product_id,
+                '_sal_sku'          => $product->get_sku(),
+                '_sal_product_name' => $product->get_name(),
+                '_sal_old_qty'      => $old_stock,
+                '_sal_new_qty'      => (int) $new_soh,
+                '_sal_reason'       => sprintf('Received against PO #%d', (int) $po_id),
+                '_sal_adjusted_by'  => $user->display_name,
+            ],
+        ]);
+    }
 
     wp_send_json_success([
         'message' => sprintf('Received %d × %s — SOH now %s (status: %s)', $qty_received, $po->sku, $new_soh, $new_status),

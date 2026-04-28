@@ -269,6 +269,56 @@ add_filter('wc_order_statuses', function($statuses) {
 });
 
 /**
+ * Returns a map of product_id => total backorder qty currently outstanding
+ * across all in-progress orders (pending/processing/received/sent).
+ * Result is memoised per-request to keep inventory list responses fast.
+ */
+function dealer_get_backorder_quantities() {
+    static $cached = null;
+    if ($cached !== null) return $cached;
+
+    global $wpdb;
+    $active_statuses = ['wc-pending', 'wc-processing', 'wc-received', 'wc-sent'];
+    $placeholders = implode(',', array_fill(0, count($active_statuses), '%s'));
+
+    $hpos_table = $wpdb->prefix . 'wc_orders';
+    $has_hpos = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $hpos_table)) === $hpos_table;
+
+    $items_table = $wpdb->prefix . 'woocommerce_order_items';
+    $itemmeta_table = $wpdb->prefix . 'woocommerce_order_itemmeta';
+
+    if ($has_hpos) {
+        $sql = "SELECT pim.meta_value AS product_id, SUM(CAST(qm.meta_value AS UNSIGNED)) AS qty
+            FROM {$items_table} oi
+            INNER JOIN {$wpdb->prefix}wc_orders o ON o.id = oi.order_id
+            INNER JOIN {$itemmeta_table} bm ON bm.order_item_id = oi.order_item_id AND bm.meta_key = '_is_backorder' AND bm.meta_value = 'yes'
+            INNER JOIN {$itemmeta_table} pim ON pim.order_item_id = oi.order_item_id AND pim.meta_key = '_product_id'
+            INNER JOIN {$itemmeta_table} qm ON qm.order_item_id = oi.order_item_id AND qm.meta_key = '_qty'
+            WHERE oi.order_item_type = 'line_item' AND o.type = 'shop_order' AND o.status IN ($placeholders)
+            GROUP BY pim.meta_value";
+    } else {
+        $sql = "SELECT pim.meta_value AS product_id, SUM(CAST(qm.meta_value AS UNSIGNED)) AS qty
+            FROM {$items_table} oi
+            INNER JOIN {$wpdb->posts} p ON p.ID = oi.order_id
+            INNER JOIN {$itemmeta_table} bm ON bm.order_item_id = oi.order_item_id AND bm.meta_key = '_is_backorder' AND bm.meta_value = 'yes'
+            INNER JOIN {$itemmeta_table} pim ON pim.order_item_id = oi.order_item_id AND pim.meta_key = '_product_id'
+            INNER JOIN {$itemmeta_table} qm ON qm.order_item_id = oi.order_item_id AND qm.meta_key = '_qty'
+            WHERE oi.order_item_type = 'line_item' AND p.post_type = 'shop_order' AND p.post_status IN ($placeholders)
+            GROUP BY pim.meta_value";
+    }
+
+    $rows = $wpdb->get_results($wpdb->prepare($sql, ...$active_statuses));
+    $map = [];
+    if ($rows) {
+        foreach ($rows as $row) {
+            $map[(int) $row->product_id] = (int) $row->qty;
+        }
+    }
+    $cached = $map;
+    return $cached;
+}
+
+/**
  * Helper function to check if order only contains backorder items
  * Checks both the _is_backorder meta AND $0 line total as fallback
  */
@@ -702,7 +752,7 @@ add_action('template_redirect', function () {
         'login', 'inventory', 'account',
         'warehouse-orders', 'warehouse-order-detail', 'warehouse-stock-adjustment', 'warehouse-purchase-orders',
         'zeekr-orders', 'zeekr-inventory', 'zeekr-dealers',
-        'zeekr-stock-update', 'zeekr-analytics', 'zeekr-supersessions', 'zeekr-place-order', 'zeekr-statement',
+        'zeekr-stock-update', 'zeekr-analytics', 'zeekr-supersessions', 'zeekr-place-order', 'zeekr-statement', 'zeekr-hq-report',
     ];
     foreach ($no_cache_pages as $slug) {
         if (is_page($slug)) {
@@ -2392,6 +2442,8 @@ function dealer_format_product($product_id, $context = 'dealer') {
         $data['stock'] = $total_stock;
         $data['reserved_qty'] = $reserved_qty;
         $data['visible_stock'] = max(0, $total_stock - $reserved_qty);
+        $bo_map = dealer_get_backorder_quantities();
+        $data['backorder_qty'] = (int) ($bo_map[$product_id] ?? 0);
     } else {
         // Dealers see only visible stock (total minus reserved)
         $data['stock'] = max(0, $total_stock - $reserved_qty);
@@ -3500,6 +3552,22 @@ add_shortcode('zeekr_statement', function () {
 });
 
 /**
+ * Zeekr Admin HQ Report shortcode - line-item invoice export for China HQ
+ */
+add_shortcode('zeekr_hq_report', function () {
+    if (!is_user_logged_in()) {
+        return '<p>Please login to view this report.</p>';
+    }
+
+    $user = wp_get_current_user();
+    if (!in_array('zeekr_admin', (array) $user->roles) && !in_array('administrator', (array) $user->roles)) {
+        return '<p>You do not have permission to view this page.</p>';
+    }
+
+    return '<div id="zeekr-hq-report-root"></div>';
+});
+
+/**
  * Zeekr Admin Supersessions shortcode - manage part supersessions
  */
 add_shortcode('zeekr_supersessions', function () {
@@ -3695,6 +3763,43 @@ add_action('wp_enqueue_scripts', function () {
 });
 
 /**
+ * Enqueue Zeekr Admin HQ Report script
+ */
+add_action('wp_enqueue_scripts', function () {
+    if (!is_page('zeekr-hq-report')) {
+        return;
+    }
+
+    $user = wp_get_current_user();
+    if (!in_array('zeekr_admin', (array) $user->roles) && !in_array('administrator', (array) $user->roles)) {
+        return;
+    }
+
+    $dist_url = DEALER_SYSTEM_URL . 'dist/';
+    wp_enqueue_style('dealer-styles', $dist_url . 'css/style.css', [], time());
+    wp_enqueue_script('zeekr-hq-report', $dist_url . 'js/zeekr-hq-report.js', [], time(), true);
+
+    $dealers_list = [];
+    $dealer_users = get_users(['role' => 'dealer', 'orderby' => 'display_name', 'order' => 'ASC']);
+    foreach ($dealer_users as $dealer_user) {
+        $dealer_name = get_user_meta($dealer_user->ID, 'dealer_name', true);
+        if (empty($dealer_name)) {
+            $dealer_name = $dealer_user->display_name;
+        }
+        $dealers_list[] = [
+            'id' => $dealer_user->ID,
+            'name' => $dealer_name,
+        ];
+    }
+
+    wp_localize_script('zeekr-hq-report', 'zeekrHqReport', [
+        'ajaxUrl' => admin_url('admin-ajax.php'),
+        'nonce'   => wp_create_nonce('zeekr_hq_report'),
+        'dealers' => $dealers_list,
+    ]);
+});
+
+/**
  * Enqueue Zeekr Admin stock update script
  */
 add_action('wp_enqueue_scripts', function () {
@@ -3791,7 +3896,7 @@ add_action('wp_enqueue_scripts', function () {
  * Add type="module" for Zeekr Admin scripts
  */
 add_filter('script_loader_tag', function ($tag, $handle, $src) {
-    if (in_array($handle, ['zeekr-orders', 'zeekr-inventory', 'zeekr-dealers', 'zeekr-analytics', 'zeekr-stock-update', 'zeekr-supersessions', 'zeekr-place-order', 'zeekr-statement'])) {
+    if (in_array($handle, ['zeekr-orders', 'zeekr-inventory', 'zeekr-dealers', 'zeekr-analytics', 'zeekr-stock-update', 'zeekr-supersessions', 'zeekr-place-order', 'zeekr-statement', 'zeekr-hq-report'])) {
         $tag = str_replace('<script ', '<script type="module" ', $tag);
     }
     return $tag;
@@ -5720,6 +5825,109 @@ add_action('wp_ajax_zeekr_get_tax_invoice_report', function() {
             'quantity'      => $total_qty_sum,
         ],
         'count' => count($rows),
+    ]);
+});
+
+/**
+ * AJAX handler for Zeekr Admin - get invoice line items report (for HQ Report tab)
+ * Returns one row per order line item (not aggregated per invoice).
+ */
+add_action('wp_ajax_zeekr_get_invoice_line_items', function() {
+    check_ajax_referer('zeekr_hq_report', 'nonce');
+
+    $user = wp_get_current_user();
+    if (!in_array('zeekr_admin', (array) $user->roles) && !in_array('administrator', (array) $user->roles)) {
+        wp_send_json_error(['message' => 'Permission denied']);
+        return;
+    }
+
+    $dealer_id = intval($_POST['dealer_id'] ?? 0); // 0 = all dealers
+    $date_from = sanitize_text_field($_POST['date_from'] ?? '');
+    $date_to   = sanitize_text_field($_POST['date_to'] ?? '');
+
+    if (empty($date_from) || empty($date_to)) {
+        wp_send_json_error(['message' => 'Date range is required']);
+        return;
+    }
+
+    $args = [
+        'type'         => 'shop_order',
+        'status'       => ['wc-completed', 'wc-processing', 'wc-shipped', 'wc-on-hold', 'wc-pending', 'wc-invoiced', 'wc-received', 'wc-refunded', 'wc-partial-refund', 'wc-sent'],
+        'date_created' => $date_from . '...' . $date_to,
+        'limit'        => -1,
+        'orderby'      => 'date',
+        'order'        => 'ASC',
+    ];
+    if ($dealer_id > 0) {
+        $args['customer_id'] = $dealer_id;
+    }
+
+    $orders = wc_get_orders($args);
+    $rows = [];
+
+    foreach ($orders as $order) {
+        $order_id    = $order->get_id();
+        $customer_id = $order->get_customer_id();
+
+        // Skip $0 orders (warranty/free) — same rule as the existing tax invoice report
+        if ((float) $order->get_total() == 0) continue;
+
+        // Dealer name
+        $company_name = get_user_meta($customer_id, 'dealer_dealer_company_name', true);
+        if (empty($company_name)) {
+            $company_name = $order->get_billing_company() ?: ($order->get_billing_first_name() . ' ' . $order->get_billing_last_name());
+        }
+
+        $invoice_no = 'ZAU' . $order_id;
+        $order_date = $order->get_date_created();
+        $inv_date_iso = $order_date ? $order_date->date('Y-m-d') : '';
+
+        // Optional dealer-supplied PO reference
+        $dealer_ref = $order->get_meta('_dealer_po_number');
+        if (empty($dealer_ref)) {
+            $dealer_ref = $order->get_meta('_dealer_reference');
+        }
+
+        foreach ($order->get_items() as $item) {
+            // Skip backorder placeholder lines
+            $is_backorder = $item->get_meta('_is_backorder') === 'yes';
+            if ($is_backorder) continue;
+
+            $product = $item->get_product();
+            $sku  = $product ? $product->get_sku() : '';
+            $name = $item->get_name();
+            $qty  = (int) $item->get_quantity();
+            if ($qty <= 0) continue;
+
+            $line_ex_gst = (float) $item->get_subtotal(); // pre-discount, pre-tax
+            $unit_price  = $qty > 0 ? round($line_ex_gst / $qty, 2) : 0;
+
+            $rows[] = [
+                'invoice_no'    => $invoice_no,
+                'order_no'      => $dealer_ref ?: '',
+                'inv_date'      => $inv_date_iso,
+                'dealer'        => $company_name,
+                'part_no'       => $sku ?: '',
+                'part_name'     => $name,
+                'qty'           => $qty,
+                'unit_price'    => $unit_price,
+                'total_ex_gst'  => round($line_ex_gst, 2),
+                'delivered_time' => $inv_date_iso, // per HQ: delivered time = invoiced date
+                'order_id'      => $order_id,
+            ];
+        }
+    }
+
+    $total_qty   = array_sum(array_column($rows, 'qty'));
+    $total_ex    = array_sum(array_column($rows, 'total_ex_gst'));
+
+    wp_send_json_success([
+        'rows'   => $rows,
+        'totals' => [
+            'qty'          => $total_qty,
+            'total_ex_gst' => round($total_ex, 2),
+        ],
+        'count'  => count($rows),
     ]);
 });
 
@@ -10311,6 +10519,7 @@ add_action('wp_body_open', function () {
                 <a href="<?php echo home_url('/zeekr-supersessions/'); ?>" <?php echo is_page('zeekr-supersessions') ? 'class="active"' : ''; ?>>Supersessions</a>
                 <a href="<?php echo home_url('/zeekr-analytics/'); ?>" <?php echo is_page('zeekr-analytics') ? 'class="active"' : ''; ?>>Analytics</a>
                 <a href="<?php echo home_url('/zeekr-statement/'); ?>" <?php echo is_page('zeekr-statement') ? 'class="active"' : ''; ?>>Statement</a>
+                <a href="<?php echo home_url('/zeekr-hq-report/'); ?>" <?php echo is_page('zeekr-hq-report') ? 'class="active"' : ''; ?>>HQ Report</a>
                 <a href="<?php echo esc_url(dealer_logout_url()); ?>" class="dealer-logout">Logout</a>
             <?php elseif (in_array('warehouse_manager', (array) $user->roles)): ?>
                 <!-- Warehouse Manager Menu -->

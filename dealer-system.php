@@ -270,7 +270,8 @@ add_filter('wc_order_statuses', function($statuses) {
 
 /**
  * Returns a map of product_id => total backorder qty currently outstanding
- * across all in-progress orders (pending/processing/received/sent).
+ * (qty - fulfilled), aggregated across all dealer backorder line items
+ * that haven't been fulfilled or cancelled. Matches the Backorder Report.
  * Result is memoised per-request to keep inventory list responses fast.
  */
 function dealer_get_backorder_quantities() {
@@ -278,7 +279,10 @@ function dealer_get_backorder_quantities() {
     if ($cached !== null) return $cached;
 
     global $wpdb;
-    $active_statuses = ['wc-pending', 'wc-processing', 'wc-received', 'wc-sent'];
+    // Same statuses as the Backorder Report (line ~7056). Backorder items can sit
+    // on completed orders too — the order can complete while a $0 backorder line
+    // remains outstanding at the item level.
+    $active_statuses = ['wc-pending', 'wc-processing', 'wc-received', 'wc-sent', 'wc-completed'];
     $placeholders = implode(',', array_fill(0, count($active_statuses), '%s'));
 
     $hpos_table = $wpdb->prefix . 'wc_orders';
@@ -287,24 +291,33 @@ function dealer_get_backorder_quantities() {
     $items_table = $wpdb->prefix . 'woocommerce_order_items';
     $itemmeta_table = $wpdb->prefix . 'woocommerce_order_itemmeta';
 
+    $select = "SELECT pim.meta_value AS product_id,
+        SUM(CAST(qm.meta_value AS UNSIGNED) - COALESCE(CAST(fm.meta_value AS UNSIGNED), 0)) AS qty
+        FROM {$items_table} oi
+        INNER JOIN {$itemmeta_table} bm ON bm.order_item_id = oi.order_item_id AND bm.meta_key = '_is_backorder' AND bm.meta_value = 'yes'
+        INNER JOIN {$itemmeta_table} pim ON pim.order_item_id = oi.order_item_id AND pim.meta_key = '_product_id'
+        INNER JOIN {$itemmeta_table} qm ON qm.order_item_id = oi.order_item_id AND qm.meta_key = '_qty'
+        LEFT JOIN {$itemmeta_table} fm ON fm.order_item_id = oi.order_item_id AND fm.meta_key = '_fulfilled_qty'
+        LEFT JOIN {$itemmeta_table} sm ON sm.order_item_id = oi.order_item_id AND sm.meta_key = '_backorder_status'";
+
     if ($has_hpos) {
-        $sql = "SELECT pim.meta_value AS product_id, SUM(CAST(qm.meta_value AS UNSIGNED)) AS qty
-            FROM {$items_table} oi
+        $sql = $select . "
             INNER JOIN {$wpdb->prefix}wc_orders o ON o.id = oi.order_id
-            INNER JOIN {$itemmeta_table} bm ON bm.order_item_id = oi.order_item_id AND bm.meta_key = '_is_backorder' AND bm.meta_value = 'yes'
-            INNER JOIN {$itemmeta_table} pim ON pim.order_item_id = oi.order_item_id AND pim.meta_key = '_product_id'
-            INNER JOIN {$itemmeta_table} qm ON qm.order_item_id = oi.order_item_id AND qm.meta_key = '_qty'
-            WHERE oi.order_item_type = 'line_item' AND o.type = 'shop_order' AND o.status IN ($placeholders)
-            GROUP BY pim.meta_value";
+            WHERE oi.order_item_type = 'line_item'
+              AND o.type = 'shop_order'
+              AND o.status IN ($placeholders)
+              AND (sm.meta_value IS NULL OR sm.meta_value NOT IN ('cancelled', 'fulfilled'))
+            GROUP BY pim.meta_value
+            HAVING qty > 0";
     } else {
-        $sql = "SELECT pim.meta_value AS product_id, SUM(CAST(qm.meta_value AS UNSIGNED)) AS qty
-            FROM {$items_table} oi
+        $sql = $select . "
             INNER JOIN {$wpdb->posts} p ON p.ID = oi.order_id
-            INNER JOIN {$itemmeta_table} bm ON bm.order_item_id = oi.order_item_id AND bm.meta_key = '_is_backorder' AND bm.meta_value = 'yes'
-            INNER JOIN {$itemmeta_table} pim ON pim.order_item_id = oi.order_item_id AND pim.meta_key = '_product_id'
-            INNER JOIN {$itemmeta_table} qm ON qm.order_item_id = oi.order_item_id AND qm.meta_key = '_qty'
-            WHERE oi.order_item_type = 'line_item' AND p.post_type = 'shop_order' AND p.post_status IN ($placeholders)
-            GROUP BY pim.meta_value";
+            WHERE oi.order_item_type = 'line_item'
+              AND p.post_type = 'shop_order'
+              AND p.post_status IN ($placeholders)
+              AND (sm.meta_value IS NULL OR sm.meta_value NOT IN ('cancelled', 'fulfilled'))
+            GROUP BY pim.meta_value
+            HAVING qty > 0";
     }
 
     $rows = $wpdb->get_results($wpdb->prepare($sql, ...$active_statuses));
@@ -342,6 +355,17 @@ function dealer_order_is_backorder_only($order) {
         }
     }
     return true; // All items are backorder
+}
+
+/**
+ * Returns true only for $0 backorder-placeholder orders (the original cart submission
+ * with all items on backorder and no money charged). Fulfillment orders created later
+ * carry the real dollar value and MUST appear in sales reports — they are NOT placeholders.
+ *
+ * Use this in revenue/HQ/analytics reports to skip placeholders only.
+ */
+function dealer_order_is_backorder_placeholder($order) {
+    return (float) $order->get_total() == 0 && dealer_order_is_backorder_only($order);
 }
 
 /**
@@ -1315,6 +1339,26 @@ add_filter('woocommerce_order_item_name', function($item_name, $item, $is_visibl
                 $status_bg = $backorder_status === 'fulfilled' ? '#dcfce7' : '#fff7ed';
                 $status_label = $backorder_status === 'fulfilled' ? 'Fulfilled' : 'Back Order';
                 $item_name .= '<br><span class="backorder-badge" style="display: inline-block; margin-top: 4px; padding: 2px 8px; font-size: 11px; font-weight: 500; background: ' . $status_bg . '; color: ' . $status_color . '; border-radius: 4px;">' . $status_label . '</span>';
+
+                // For fulfilled / partially-fulfilled items, list the separate invoice(s) where the dealer was actually billed.
+                if (in_array($backorder_status, ['fulfilled', 'partially_fulfilled'], true)) {
+                    $history = $item->get_meta('_fulfillment_history');
+                    $fulfillment_ids = [];
+                    if (is_array($history)) {
+                        foreach ($history as $entry) {
+                            $oid = (int) ($entry['order_id'] ?? 0);
+                            if ($oid > 0) $fulfillment_ids[$oid] = true;
+                        }
+                    }
+                    if (empty($fulfillment_ids)) {
+                        $legacy_oid = (int) $item->get_meta('_fulfilled_order_id');
+                        if ($legacy_oid > 0) $fulfillment_ids[$legacy_oid] = true;
+                    }
+                    if (!empty($fulfillment_ids)) {
+                        $labels = array_map(function($id) { return 'ZAU' . $id; }, array_keys($fulfillment_ids));
+                        $item_name .= '<br><span style="display: inline-block; margin-top: 4px; font-size: 11px; color: #6b7280;">Billed in ' . esc_html(implode(', ', $labels)) . '</span>';
+                    }
+                }
             }
         }
 
@@ -1343,16 +1387,40 @@ add_filter('woocommerce_order_item_name', function($item_name, $item, $is_visibl
 }, 10, 3);
 
 /**
- * Hide line item subtotals for warehouse managers on view-order page
+ * Hide line item subtotals for warehouse managers on view-order page.
+ * For fulfilled / partially-fulfilled backorder items, show the price the
+ * dealer was actually billed (via the separate fulfillment invoice), instead
+ * of the $0 placeholder that's stored on the original line.
  */
 add_filter('woocommerce_order_formatted_line_subtotal', function($subtotal, $item, $order) {
-    if (!is_wc_endpoint_url('view-order')) {
+    $is_view_order = is_wc_endpoint_url('view-order');
+    $is_order_received = is_wc_endpoint_url('order-received');
+    if (!$is_view_order && !$is_order_received) {
         return $subtotal;
     }
 
     $user = wp_get_current_user();
     if (in_array('warehouse_manager', (array) $user->roles)) {
         return ''; // Hide price for warehouse managers
+    }
+
+    $is_backorder = $item->get_meta('_is_backorder') === 'yes';
+    $backorder_status = $item->get_meta('_backorder_status');
+    if ($is_backorder && in_array($backorder_status, ['fulfilled', 'partially_fulfilled'], true)) {
+        $unit_price = (float) $item->get_meta('_backorder_original_price');
+        if ($unit_price > 0) {
+            $history = $item->get_meta('_fulfillment_history');
+            $fulfilled_qty = 0;
+            if (is_array($history)) {
+                foreach ($history as $entry) {
+                    $fulfilled_qty += (int) ($entry['qty'] ?? 0);
+                }
+            }
+            if ($fulfilled_qty <= 0) {
+                $fulfilled_qty = (int) ($item->get_meta('_fulfilled_qty') ?: $item->get_quantity());
+            }
+            return wc_price($unit_price * $fulfilled_qty, ['currency' => $order->get_currency()]);
+        }
     }
 
     return $subtotal;
@@ -4610,18 +4678,26 @@ add_action('wp_ajax_zeekr_update_product', function() {
     }
 
     // Update stock
-    $old_qty = $product->get_stock_quantity();
+    $old_qty = (int) $product->get_stock_quantity();
     $stock_changed = false;
-    if (isset($_POST['stock'])) {
+    $new_qty = $old_qty;
+    if (isset($_POST['stock']) && $_POST['stock'] !== '') {
         $new_qty = intval($_POST['stock']);
+        $product->set_manage_stock(true);
+        $product->set_stock_quantity($new_qty);
+        $product->set_stock_status($new_qty > 0 ? 'instock' : 'onbackorder');
         if ($new_qty !== $old_qty) {
-            $product->set_stock_quantity($new_qty);
             $stock_changed = true;
         }
-        $product->set_manage_stock(true);
     }
 
     $product->save();
+    wc_delete_product_transients($product_id);
+
+    // Re-read fresh from DB to confirm what was actually persisted
+    clean_post_cache($product_id);
+    $fresh_product = wc_get_product($product_id);
+    $persisted_qty = $fresh_product ? (int) $fresh_product->get_stock_quantity() : $new_qty;
 
     // Create audit log if stock changed
     if ($stock_changed) {
@@ -4687,7 +4763,18 @@ add_action('wp_ajax_zeekr_update_product', function() {
         update_post_meta($product_id, '_list_order_price', floatval($_POST['list_order_price']));
     }
 
-    wp_send_json_success(['message' => 'Product updated successfully']);
+    $reserved_after = (int) get_post_meta($product_id, '_reserved_qty', true);
+    wp_send_json_success([
+        'message' => $stock_changed
+            ? sprintf('Stock updated: %d → %d', $old_qty, $persisted_qty)
+            : 'Product updated successfully',
+        'stock' => $persisted_qty,
+        'reserved_qty' => $reserved_after,
+        'visible_stock' => max(0, $persisted_qty - $reserved_after),
+        'stock_changed' => $stock_changed,
+        'old_qty' => $old_qty,
+        'new_qty' => $persisted_qty,
+    ]);
 });
 
 /**
@@ -5850,6 +5937,12 @@ add_action('wp_ajax_zeekr_get_invoice_line_items', function() {
         return;
     }
 
+    // HQ Report is the FULL accounting ledger — broader than Analytics on purpose.
+    // It must show every order that contributes to (or refunds from) actual revenue:
+    //   - pending / on-hold / invoiced: orders placed, awaiting payment (still a sale on paper)
+    //   - refunded / partial-refund: included so the report nets refunds correctly
+    //   - shipped / sent / received / processing / completed: in-flight or finalised sales
+    // Excluded: cancelled (never a sale). Backorder $0 placeholders are filtered below.
     $args = [
         'type'         => 'shop_order',
         'status'       => ['wc-completed', 'wc-processing', 'wc-shipped', 'wc-on-hold', 'wc-pending', 'wc-invoiced', 'wc-received', 'wc-refunded', 'wc-partial-refund', 'wc-sent'],
@@ -5871,6 +5964,11 @@ add_action('wp_ajax_zeekr_get_invoice_line_items', function() {
 
         // Skip $0 orders (warranty/free) — same rule as the existing tax invoice report
         if ((float) $order->get_total() == 0) continue;
+
+        // Skip ONLY the $0 backorder-placeholder original cart submissions.
+        // Fulfillment orders (which carry the real $$$ and _backorder_source_order meta)
+        // are the real sale and MUST appear in this report.
+        if (dealer_order_is_backorder_placeholder($order)) continue;
 
         // Dealer name
         $company_name = get_user_meta($customer_id, 'dealer_dealer_company_name', true);
@@ -6100,9 +6198,9 @@ add_action('wp_ajax_zeekr_get_analytics', function() {
         $order_local_date = $order_date->date('Y-m-d');
         if ($order_local_date < $local_after || $order_local_date > $local_before) continue;
 
-        // Skip backorder-related orders from analytics
-        if (dealer_order_is_backorder_only($order)) continue;
-        if ($order->get_meta('_backorder_source_order')) continue;
+        // Skip ONLY the $0 backorder-placeholder original orders.
+        // Fulfillment orders carry the real revenue and must be counted here.
+        if (dealer_order_is_backorder_placeholder($order)) continue;
 
         // Determine interval key
         switch ($interval) {
@@ -6290,9 +6388,9 @@ add_action('wp_ajax_zeekr_get_orders_analytics', function() {
         $order_local_date = $order_date->date('Y-m-d');
         if ($order_local_date < $local_after || $order_local_date > $local_before) continue;
 
-        // Skip backorder-related orders from analytics
-        if (dealer_order_is_backorder_only($order)) continue;
-        if ($order->get_meta('_backorder_source_order')) continue;
+        // Skip ONLY the $0 backorder-placeholder original orders.
+        // Fulfillment orders carry the real revenue and must appear in the orders list.
+        if (dealer_order_is_backorder_placeholder($order)) continue;
 
         // Get order details (exclude GST and deduct refunds, consistent with revenue tab)
         $order_total = (float) $order->get_total();
@@ -6458,9 +6556,9 @@ add_action('wp_ajax_zeekr_get_products_analytics', function() {
             if ($old < $local_after || $old > $local_before) continue;
         }
 
-        // Skip backorder-related orders from analytics (consistent with revenue/orders tabs)
-        if (dealer_order_is_backorder_only($order)) continue;
-        if ($order->get_meta('_backorder_source_order')) continue;
+        // Skip ONLY the $0 backorder-placeholder original orders (consistent with revenue/orders tabs).
+        // Fulfillment orders carry the real product sales and must be counted here.
+        if (dealer_order_is_backorder_placeholder($order)) continue;
 
         foreach ($order->get_items() as $item) {
             $product_id = $item->get_product_id();
@@ -6903,8 +7001,11 @@ add_action('wp_ajax_zeekr_get_fill_rate', function() {
         $order_local_date = $order_date->date('Y-m-d');
         if ($order_local_date < $local_after || $order_local_date > $local_before) continue;
 
-        // Skip backorder fulfillment orders (orders created to fulfill backorders later)
-        // But DO NOT skip original orders even if all items went to backorder
+        // INTENTIONALLY skip fulfillment orders here only.
+        // The short-ship report is keyed by original PO/sales-order — a fulfillment
+        // order isn't a fresh PO, so including it would double-count the short-ship
+        // calculation against the original. Revenue/HQ reports DO show fulfillment
+        // orders (they're the real $$$); this report does not.
         if ($order->get_meta('_backorder_source_order')) continue;
 
         // Get short ship info from refund_summary

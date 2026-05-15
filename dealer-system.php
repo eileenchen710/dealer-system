@@ -1443,23 +1443,18 @@ add_filter('woocommerce_get_formatted_order_total', function($formatted_total, $
 }, 10, 2);
 
 /**
- * Add print logo header to body (outside woocommerce container to prevent duplication)
+ * Add print logo header inside the .woocommerce container so it flows with the
+ * paginated content. Previously emitted at wp_footer with position:fixed, which
+ * caused the header to overlap line items on page 2+ in Chrome's print engine.
  */
-add_action('wp_footer', function() {
+add_action('woocommerce_order_details_before_order_table', function($order) {
     $is_view_order = is_wc_endpoint_url('view-order');
     $is_order_received = is_wc_endpoint_url('order-received');
     if (!$is_view_order && !$is_order_received) {
         return;
     }
 
-    // Get order ID for invoice number display
-    $order_id = '';
-    if ($is_view_order) {
-        $order_id = absint(get_query_var('view-order'));
-    } elseif ($is_order_received) {
-        $order_id = absint(get_query_var('order-received'));
-    }
-
+    $order_id = method_exists($order, 'get_id') ? $order->get_id() : 0;
     $logo_url = DEALER_SYSTEM_URL . 'dist/Zeekr logo & address.png';
     echo '<div class="print-logo-header">';
     echo '<img src="' . esc_url($logo_url) . '" alt="ZEEKR" />';
@@ -1467,7 +1462,7 @@ add_action('wp_footer', function() {
         echo '<div class="print-invoice-number" style="text-align: right; font-size: 14px; font-weight: 600; margin-top: 5px;">Tax Invoice Number ZAU' . esc_html($order_id) . '</div>';
     }
     echo '</div>';
-});
+}, 5);
 
 /**
  * Display Tax Invoice Number title at top of order-received page for dealers
@@ -1568,13 +1563,13 @@ add_action('wp_head', function() {
         }
 
         @media print {
-            /* Page setup for A4 with minimal margins for page numbers */
+            /* Page setup for A4 with safe printable margins */
             @page {
                 size: A4;
-                margin: 0 0 15mm 0;
+                margin: 12mm 10mm 15mm 10mm;
             }
 
-            /* Print logo header - fixed at top */
+            /* Print logo header - flows inline at top of page 1 (not fixed, to avoid clipping rows on page 2+) */
             .print-logo-header,
             .print-logo-header * {
                 visibility: visible !important;
@@ -1582,29 +1577,21 @@ add_action('wp_head', function() {
 
             .print-logo-header {
                 display: block !important;
-                position: fixed !important;
-                top: 0 !important;
-                left: 0 !important;
-                right: 0 !important;
-                padding: 15px !important;
+                position: static !important;
+                padding: 0 0 10px 0 !important;
                 background: white !important;
-                z-index: 9999 !important;
+                margin-bottom: 10px !important;
+                border-bottom: 1px solid #e5e7eb !important;
             }
 
             .print-logo-header img {
-                max-height: 150px !important;
+                max-height: 120px !important;
                 width: auto !important;
             }
 
             /* Page footer hidden - CSS page counters have poor browser support */
             .print-page-footer {
                 display: none !important;
-            }
-
-            /* Add padding to content to account for fixed header */
-            body.woocommerce-view-order .woocommerce,
-            body.woocommerce-order-received .woocommerce {
-                padding-top: 170px !important;
             }
 
             /* Hide everything except order content */
@@ -1621,14 +1608,27 @@ add_action('wp_head', function() {
 
             body.woocommerce-view-order .woocommerce,
             body.woocommerce-order-received .woocommerce {
-                position: absolute;
-                left: 0;
-                top: 180px;
-                width: 100%;
+                position: absolute !important;
+                left: 0 !important;
+                top: 0 !important;
+                width: 100% !important;
                 max-width: 100% !important;
-                padding: 0 15px !important;
+                padding: 0 !important;
                 margin: 0 !important;
                 font-size: 10px !important;
+            }
+
+            /* Table row protection: don't split a line item across pages,
+               and repeat the column header on every page */
+            body.woocommerce-view-order .woocommerce table thead,
+            body.woocommerce-order-received .woocommerce table thead {
+                display: table-header-group !important;
+            }
+
+            body.woocommerce-view-order .woocommerce table tr,
+            body.woocommerce-order-received .woocommerce table tr {
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
             }
 
             /* Hide print button and navigation elements */

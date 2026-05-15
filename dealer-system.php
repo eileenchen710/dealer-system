@@ -3985,11 +3985,13 @@ add_action('wp_ajax_zeekr_get_orders', function() {
     $search = isset($_POST['search']) ? sanitize_text_field($_POST['search']) : '';
     $status = isset($_POST['status']) ? sanitize_text_field($_POST['status']) : '';
     $dealer_id = isset($_POST['dealer_id']) ? intval($_POST['dealer_id']) : 0;
+    $page = max(1, intval($_POST['page'] ?? 1));
+    $per_page = max(10, min(200, intval($_POST['per_page'] ?? 50)));
 
     $excluded_statuses = ['checkout-draft', 'auto-draft', 'trash', 'draft'];
 
     $args = [
-        'limit' => !empty($search) ? -1 : 100,
+        'limit' => -1, // fetch all; pagination applied after post-filtering (search, status exclusions)
         'orderby' => 'date',
         'order' => 'DESC',
         'type' => 'shop_order',
@@ -4119,9 +4121,21 @@ add_action('wp_ajax_zeekr_get_orders', function() {
         }
     }
 
+    // Paginate the post-filtered list
+    $total_count = count($order_data);
+    $total_pages = max(1, (int) ceil($total_count / $per_page));
+    $page = min($page, $total_pages);
+    $paginated = array_slice($order_data, ($page - 1) * $per_page, $per_page);
+
     wp_send_json_success([
-        'orders' => $order_data,
+        'orders' => $paginated,
         'statuses' => $filtered_statuses,
+        'pagination' => [
+            'page' => $page,
+            'per_page' => $per_page,
+            'total_count' => $total_count,
+            'total_pages' => $total_pages,
+        ],
     ]);
 });
 
@@ -6057,7 +6071,7 @@ add_action('wp_ajax_zeekr_record_adjustment', function() {
         return;
     }
 
-    $valid_types = ['opening_balance', 'debit_note', 'credit_note', 'write_off'];
+    $valid_types = ['opening_balance', 'debit_note', 'credit_note', 'write_off', 'payment_received'];
     if (!in_array($adj_type, $valid_types)) {
         wp_send_json_error(['message' => 'Invalid adjustment type']);
         return;
@@ -6075,6 +6089,7 @@ add_action('wp_ajax_zeekr_record_adjustment', function() {
         'debit_note' => 'Debit Note',
         'credit_note' => 'Credit Note',
         'write_off' => 'Write-off',
+        'payment_received' => 'Payment Received',
     ];
     $desc = $type_labels[$adj_type] ?? 'Adjustment';
     if (!empty($description)) {
@@ -8672,12 +8687,14 @@ add_action('wp_ajax_warehouse_get_orders', function() {
 
     $search = isset($_POST['search']) ? sanitize_text_field($_POST['search']) : '';
     $status = isset($_POST['status']) ? sanitize_text_field($_POST['status']) : '';
+    $page = max(1, intval($_POST['page'] ?? 1));
+    $per_page = max(10, min(200, intval($_POST['per_page'] ?? 50)));
 
     // Warehouse manager can only see these statuses
     $allowed_statuses = ['received', 'processing', 'completed', 'partial-refund', 'refunded'];
 
     $args = [
-        'limit' => !empty($search) ? -1 : 100,
+        'limit' => -1, // fetch all; pagination is applied after post-filtering (search, backorder-only skip)
         'orderby' => 'date',
         'order' => 'DESC',
         'type' => 'shop_order',
@@ -8813,10 +8830,22 @@ add_action('wp_ajax_warehouse_get_orders', function() {
     ]);
     $received_count = count($received_orders);
 
+    // Paginate the post-filtered list
+    $total_count = count($order_data);
+    $total_pages = max(1, (int) ceil($total_count / $per_page));
+    $page = min($page, $total_pages);
+    $paginated = array_slice($order_data, ($page - 1) * $per_page, $per_page);
+
     wp_send_json_success([
-        'orders' => $order_data,
+        'orders' => $paginated,
         'statuses' => $filtered_statuses,
         'received_count' => $received_count,
+        'pagination' => [
+            'page' => $page,
+            'per_page' => $per_page,
+            'total_count' => $total_count,
+            'total_pages' => $total_pages,
+        ],
     ]);
 });
 

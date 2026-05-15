@@ -1794,6 +1794,15 @@ add_action('wp_head', function() {
                 font-size: 9px !important;
             }
 
+            /* Prevent the totals (tfoot) from repeating on every printed page.
+               By default browsers render <tfoot> as display:table-footer-group,
+               which repeats the footer at the bottom of every page. For an
+               invoice we want totals to appear only once on the last page. */
+            body.woocommerce-view-order .woocommerce table tfoot,
+            body.woocommerce-order-received .woocommerce table tfoot {
+                display: table-row-group !important;
+            }
+
             /* Address section if visible */
             .woocommerce-customer-details {
                 font-size: 9px !important;

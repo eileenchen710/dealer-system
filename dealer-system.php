@@ -6664,12 +6664,12 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
     }
 
     // The SOH export builds a per-product, per-day matrix (products × days).
-    // For wide date ranges (e.g. 3 months × 2000+ products) the result array
-    // peaks at ~150-170MB, which blows the default 128M/30s PHP-FPM limits and
-    // fatals mid-build — the browser then shows "Failed to download SOH report".
-    // Raise both limits for this request so wide ranges complete.
-    @ini_set('memory_limit', '512M');
-    @set_time_limit(120);
+    // Memory scales with the number of days, so a wide range × 2000+ products
+    // can otherwise blow the default 128M/30s PHP-FPM limits and fatal mid-build
+    // (the browser then shows "Failed to download SOH report"). We both cap the
+    // range to 6 months (below) and raise the limits to leave comfortable room.
+    @ini_set('memory_limit', '768M');
+    @set_time_limit(180);
 
     $before = isset($_POST['before']) ? sanitize_text_field($_POST['before']) : date('Y-m-d');
     $after = isset($_POST['after']) ? sanitize_text_field($_POST['after']) : date('Y-m-d', strtotime('-7 days'));
@@ -6683,6 +6683,16 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
     $wp_tz = new DateTimeZone(wp_timezone_string());
     $before_date = new DateTime($before, $wp_tz);
     $after_date = new DateTime($after, $wp_tz);
+
+    // Cap the range at 6 calendar months. The report is a per-day matrix, so an
+    // unbounded range ("All time"/"This year") produces an enormous, unusable
+    // CSV and exhausts memory. Allow back to the 1st of the month 6 months ago,
+    // which matches the "6 months" preset; anything earlier is rejected.
+    $earliest_allowed = (clone $before_date)->modify('first day of this month')->modify('-6 months');
+    if ($after_date < $earliest_allowed) {
+        wp_send_json_error(['message' => 'The SOH report supports a maximum range of 6 months. Please choose a shorter date range.']);
+        return;
+    }
 
     // Build list of dates in the range
     $dates = [];

@@ -6663,6 +6663,14 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
         return;
     }
 
+    // The SOH export builds a per-product, per-day matrix (products × days).
+    // For wide date ranges (e.g. 3 months × 2000+ products) the result array
+    // peaks at ~150-170MB, which blows the default 128M/30s PHP-FPM limits and
+    // fatals mid-build — the browser then shows "Failed to download SOH report".
+    // Raise both limits for this request so wide ranges complete.
+    @ini_set('memory_limit', '512M');
+    @set_time_limit(120);
+
     $before = isset($_POST['before']) ? sanitize_text_field($_POST['before']) : date('Y-m-d');
     $after = isset($_POST['after']) ? sanitize_text_field($_POST['after']) : date('Y-m-d', strtotime('-7 days'));
     $dealer_ids = isset($_POST['dealer_ids']) ? array_map('intval', (array) $_POST['dealer_ids']) : [];

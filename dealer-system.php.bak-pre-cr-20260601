@@ -41,54 +41,12 @@ function dealer_system_create_supersessions_table() {
 register_activation_hook(__FILE__, 'dealer_system_create_supersessions_table');
 add_action('init', function() {
     $db_version = get_option('dealer_system_db_version', '0');
-    if (version_compare($db_version, '2.0.7', '<')) {
+    if (version_compare($db_version, '2.0.6', '<')) {
         dealer_system_create_supersessions_table();
         dealer_system_create_purchase_orders_table();
-        dealer_system_create_credit_notes_table();
-        update_option('dealer_system_db_version', '2.0.7');
+        update_option('dealer_system_db_version', '2.0.6');
     }
 });
-
-/**
- * Create credit notes table.
- *
- * A credit note (CR-xxxxx) is a standalone accounting document raised against an
- * existing tax invoice (order). It NEVER alters the original invoice — the order's
- * line items and totals stay intact. Amounts are stored as positive magnitudes;
- * the document and reports render them as negatives.
- */
-function dealer_system_create_credit_notes_table() {
-    global $wpdb;
-    $table = $wpdb->prefix . 'dealer_credit_notes';
-    $charset_collate = $wpdb->get_charset_collate();
-
-    $sql = "CREATE TABLE IF NOT EXISTS $table (
-        id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-        cr_number varchar(20) NOT NULL,
-        cr_seq bigint(20) unsigned NOT NULL DEFAULT 0,
-        source_order_id bigint(20) unsigned NOT NULL,
-        dealer_id bigint(20) unsigned NOT NULL DEFAULT 0,
-        reason varchar(255) NOT NULL DEFAULT '',
-        note text,
-        items longtext,
-        total_ex_gst decimal(12,2) NOT NULL DEFAULT 0,
-        gst decimal(12,2) NOT NULL DEFAULT 0,
-        total_inc_gst decimal(12,2) NOT NULL DEFAULT 0,
-        issued_by bigint(20) unsigned NOT NULL DEFAULT 0,
-        issued_by_name varchar(190) NOT NULL DEFAULT '',
-        source varchar(20) NOT NULL DEFAULT 'manual',
-        created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        UNIQUE KEY cr_number (cr_number),
-        KEY source_order_id (source_order_id),
-        KEY dealer_id (dealer_id),
-        KEY created_at (created_at)
-    ) $charset_collate;";
-
-    require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-    dbDelta($sql);
-}
-register_activation_hook(__FILE__, 'dealer_system_create_credit_notes_table');
 
 /**
  * Create purchase orders table
@@ -2064,69 +2022,6 @@ add_action('woocommerce_after_order_details', function($order) {
         </div>
     </section>
     <?php endif; ?>
-    <?php
-    // Display Credit Notes raised against this order (CR documents)
-    global $wpdb;
-    $cn_table = $wpdb->prefix . 'dealer_credit_notes';
-    $credit_notes = $wpdb->get_results($wpdb->prepare(
-        "SELECT * FROM $cn_table WHERE source_order_id = %d ORDER BY cr_seq ASC",
-        $order->get_id()
-    ));
-    if (!empty($credit_notes)):
-        $cn_total_ex = 0; $cn_total_inc = 0;
-        foreach ($credit_notes as $cn) { $cn_total_ex += (float) $cn->total_ex_gst; $cn_total_inc += (float) $cn->total_inc_gst; }
-    ?>
-    <section class="dealer-info-section" style="margin-bottom: 20px; background: #fef2f2; border: 1px solid #fecaca;">
-        <h3 style="color: #dc2626;">Credit Notes</h3>
-        <?php foreach ($credit_notes as $cn):
-            $cn_items = json_decode($cn->items, true) ?: [];
-            $cn_print = esc_url(add_query_arg('zeekr_print_credit_note', rawurlencode($cn->cr_number), home_url('/')));
-        ?>
-        <div style="background: white; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <div>
-                    <strong style="font-size: 14px;"><?php echo esc_html($cn->cr_number); ?></strong>
-                    <span style="color: #6b7280; font-size: 13px; margin-left: 8px;"><?php echo esc_html($cn->created_at ? date('Y-m-d H:i', strtotime($cn->created_at)) : ''); ?></span>
-                    <span style="color: #6b7280; font-size: 13px; margin-left: 8px;">by <?php echo esc_html($cn->issued_by_name); ?></span>
-                    <?php if ($cn->source === 'short_ship'): ?><span style="color: #9ca3af; font-size: 12px; margin-left: 8px;">(short ship)</span><?php endif; ?>
-                    <?php if ($cn->reason): ?><span style="color: #6b7280; font-size: 13px; margin-left: 8px;">· <?php echo esc_html($cn->reason); ?></span><?php endif; ?>
-                </div>
-                <div style="display:flex; align-items:center; gap:12px;">
-                    <a href="<?php echo $cn_print; ?>" target="_blank" style="font-size: 13px; color: #2563eb; text-decoration: underline;">Print / PDF</a>
-                    <span style="font-weight: 600; color: #dc2626;">-$<?php echo number_format((float) $cn->total_ex_gst, 2); ?> excl. GST</span>
-                </div>
-            </div>
-            <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                <thead>
-                    <tr style="border-bottom: 1px solid #e5e7eb;">
-                        <th style="text-align: left; padding: 6px 8px; color: #6b7280; font-weight: 500;">Part Number</th>
-                        <th style="text-align: left; padding: 6px 8px; color: #6b7280; font-weight: 500;">Product</th>
-                        <th style="text-align: center; padding: 6px 8px; color: #6b7280; font-weight: 500;">Qty</th>
-                        <th style="text-align: center; padding: 6px 8px; color: #6b7280; font-weight: 500;">To Stock</th>
-                        <th style="text-align: right; padding: 6px 8px; color: #6b7280; font-weight: 500;">Amount (excl. GST)</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($cn_items as $ci): ?>
-                    <tr style="border-bottom: 1px solid #f3f4f6;">
-                        <td style="padding: 6px 8px; font-family: monospace;"><?php echo esc_html($ci['sku'] ?? '-'); ?></td>
-                        <td style="padding: 6px 8px;"><?php echo esc_html($ci['name'] ?? ''); ?></td>
-                        <td style="padding: 6px 8px; text-align: center;">-<?php echo intval($ci['qty'] ?? 0); ?></td>
-                        <td style="padding: 6px 8px; text-align: center;"><?php echo !empty($ci['return_to_stock']) ? 'Yes' : 'No'; ?></td>
-                        <td style="padding: 6px 8px; text-align: right; color:#dc2626;">-$<?php echo number_format((float) ($ci['amount_ex_gst'] ?? 0), 2); ?></td>
-                    </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-        </div>
-        <?php endforeach; ?>
-        <div style="background: white; border-radius: 8px; padding: 12px 16px; text-align: right;">
-            <strong style="color: #dc2626; font-size: 15px;">
-                Total Credited: -$<?php echo number_format($cn_total_ex, 2); ?> excl. GST / -$<?php echo number_format($cn_total_inc, 2); ?> incl. GST
-            </strong>
-        </div>
-    </section>
-    <?php endif; ?>
     <section class="dealer-info-section">
         <h3>Dealer Information</h3>
         <div class="dealer-info-grid" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;">
@@ -3816,8 +3711,6 @@ add_action('wp_enqueue_scripts', function () {
         'nonce' => wp_create_nonce('zeekr_orders'),
         'refundNonce' => wp_create_nonce('zeekr_refund_order'),
         'refundItemsNonce' => wp_create_nonce('zeekr_get_order_items'),
-        'creditNoteNonce' => wp_create_nonce('zeekr_issue_credit_note'),
-        'creditNotesListNonce' => wp_create_nonce('zeekr_get_credit_notes'),
         'dealers' => $dealers_list,
     ]);
 });
@@ -4293,9 +4186,6 @@ add_action('wp_ajax_zeekr_get_order_items', function() {
         }
     }
 
-    // Already-credited qty per item (credit notes raised against this order).
-    $credited_qty_map = zeekr_get_order_credited_qty_map($order_id);
-
     $items = [];
     foreach ($order->get_items() as $item_id => $item) {
         $product = $item->get_product();
@@ -4311,7 +4201,6 @@ add_action('wp_ajax_zeekr_get_order_items', function() {
         if ($is_backorder) continue;
 
         $refunded_qty = isset($refunded_qty_map[$item_id]) ? $refunded_qty_map[$item_id] : 0;
-        $credited_qty = isset($credited_qty_map[$item_id]) ? $credited_qty_map[$item_id] : 0;
 
         $items[] = [
             'item_id' => $item_id,
@@ -4321,7 +4210,6 @@ add_action('wp_ajax_zeekr_get_order_items', function() {
             'total' => (float) $item->get_total(),
             'total_tax' => (float) $item->get_total_tax(),
             'refunded_qty' => $refunded_qty,
-            'credited_qty' => $credited_qty,
         ];
     }
 
@@ -4337,13 +4225,6 @@ add_action('wp_ajax_zeekr_get_order_items', function() {
  */
 add_action('wp_ajax_zeekr_refund_order', function() {
     check_ajax_referer('zeekr_refund_order', 'nonce');
-
-    // DEPRECATED: invoice-altering refunds are no longer permitted (it is illegal to
-    // alter a tax invoice). This endpoint is disabled — use Credit Notes instead
-    // (zeekr_issue_credit_note). Kept as a hard stop so no legacy/cached client or
-    // direct request can mutate an invoice via wc_create_refund.
-    wp_send_json_error(['message' => 'Refunds are disabled. Please issue a Credit Note instead.']);
-    return;
 
     $user = wp_get_current_user();
     if (!in_array('zeekr_admin', (array) $user->roles) && !in_array('administrator', (array) $user->roles)) {
@@ -4545,607 +4426,6 @@ add_action('wp_ajax_zeekr_refund_order', function() {
         'message' => 'Order ZAU' . $order_id . ' ' . $status_label . '. $' . number_format($refund_amount, 2) . ' restored to dealer account.',
         'new_status' => $all_fully_refunded ? 'refunded' : 'partial-refund',
     ]);
-});
-
-// ============================================================================
-// CREDIT NOTES
-// ----------------------------------------------------------------------------
-// A credit note (CR-xxxxx) replaces the old "refund against the invoice" flow.
-// It is a SEPARATE accounting document raised against an existing tax invoice:
-//   - the original invoice/order is never modified (no wc_create_refund, no line
-//     item edits, no status change)
-//   - it gets a company-wide running number with a CR- prefix
-//   - it carries negative values and references the original invoice (ZAUxxxx)
-//   - it credits the dealer's account balance and shows on the statement
-//   - parts optionally return to stock per-line (operator choice)
-// ============================================================================
-
-/**
- * Allocate the next company-wide credit note sequence number (race-safe).
- * A single running sequence for the whole company (not per dealer).
- *
- * @return int Next sequence integer (1, 2, 3, ...).
- */
-function zeekr_get_next_credit_note_number() {
-    global $wpdb;
-    // Serialize concurrent issuers so two credit notes never grab the same number.
-    // get_var() captures the lock result (1 = acquired, 0 = timeout, NULL = error).
-    $locked = (int) $wpdb->get_var("SELECT GET_LOCK('zeekr_cr_seq', 10)");
-    try {
-        $seq = (int) get_option('_zeekr_next_credit_note_number', 1);
-        update_option('_zeekr_next_credit_note_number', $seq + 1, false);
-    } finally {
-        if ($locked === 1) {
-            $wpdb->query("SELECT RELEASE_LOCK('zeekr_cr_seq')");
-        }
-    }
-    return $seq;
-}
-
-/**
- * Format a sequence integer as a CR document number.
- */
-function zeekr_format_credit_note_number($seq) {
-    return 'CR-' . str_pad((string) intval($seq), 5, '0', STR_PAD_LEFT);
-}
-
-/**
- * Map of item_id => already-credited qty for an order (across all its credit notes).
- * Used to cap how much more of each line can still be credited.
- */
-function zeekr_get_order_credited_qty_map($order_id) {
-    global $wpdb;
-    $table = $wpdb->prefix . 'dealer_credit_notes';
-    $rows = $wpdb->get_col($wpdb->prepare("SELECT items FROM $table WHERE source_order_id = %d", $order_id));
-    $map = [];
-    foreach ($rows as $json) {
-        $items = json_decode($json, true);
-        if (!is_array($items)) continue;
-        foreach ($items as $it) {
-            $iid = (int) ($it['item_id'] ?? 0);
-            if ($iid) $map[$iid] = ($map[$iid] ?? 0) + (int) ($it['qty'] ?? 0);
-        }
-    }
-    return $map;
-}
-
-/**
- * Sum of ex-GST credit note value raised against an order.
- * Used by Analytics (revenue/orders) to net credit notes out of sales, the same
- * way get_total_refunded() used to net legacy refunds.
- */
-function zeekr_get_order_credit_total_ex_gst($order_id) {
-    global $wpdb;
-    $table = $wpdb->prefix . 'dealer_credit_notes';
-    return (float) $wpdb->get_var($wpdb->prepare(
-        "SELECT COALESCE(SUM(total_ex_gst), 0) FROM $table WHERE source_order_id = %d",
-        $order_id
-    ));
-}
-
-/**
- * Batch version of the above for report loops: order_id => SUM(total_ex_gst).
- * One query instead of N, so analytics over a large date range doesn't time out.
- */
-function zeekr_get_credit_totals_map_for_orders($order_ids) {
-    global $wpdb;
-    $ids = array_filter(array_map('intval', (array) $order_ids));
-    if (empty($ids)) return [];
-    $table = $wpdb->prefix . 'dealer_credit_notes';
-    $in = implode(',', $ids); // ints only — safe
-    $rows = $wpdb->get_results(
-        "SELECT source_order_id, COALESCE(SUM(total_ex_gst), 0) AS total_ex
-         FROM $table WHERE source_order_id IN ($in) GROUP BY source_order_id"
-    );
-    $map = [];
-    foreach ($rows as $r) $map[(int) $r->source_order_id] = (float) $r->total_ex;
-    return $map;
-}
-
-/**
- * Normalised list of credit notes for an order, for display in order-detail views.
- */
-function zeekr_get_order_credit_notes_for_display($order_id) {
-    global $wpdb;
-    $table = $wpdb->prefix . 'dealer_credit_notes';
-    $rows = $wpdb->get_results($wpdb->prepare(
-        "SELECT * FROM $table WHERE source_order_id = %d ORDER BY cr_seq ASC",
-        $order_id
-    ));
-    $out = [];
-    foreach ($rows as $r) {
-        $out[] = [
-            'cr_number'     => $r->cr_number,
-            'date'          => $r->created_at ? date('Y-m-d H:i', strtotime($r->created_at)) : '',
-            'issued_by'     => $r->issued_by_name,
-            'reason'        => $r->reason,
-            'source'        => $r->source,
-            'items'         => json_decode($r->items, true) ?: [],
-            'total_ex_gst'  => (float) $r->total_ex_gst,
-            'total_inc_gst' => (float) $r->total_inc_gst,
-            'print_url'     => add_query_arg('zeekr_print_credit_note', rawurlencode($r->cr_number), home_url('/')),
-        ];
-    }
-    return $out;
-}
-
-/**
- * Credit the dealer's account balance for a credit note and log it on the statement.
- * Positive fund_user with type 'adjustment' => statement counts it as a credit
- * (dealer owes less), exactly like the existing manual "Credit Note" adjustment.
- */
-function zeekr_credit_note_apply_funds($dealer_id, $amount, $order_id, $cr_number, $reason, $editor_name) {
-    if ($amount <= 0 || !$dealer_id || !class_exists('YITH_YWF_Customer')) {
-        error_log(sprintf('zeekr CR %s: funds NOT applied (amount=%s dealer=%s YITH=%s)', $cr_number, $amount, $dealer_id, class_exists('YITH_YWF_Customer') ? 'yes' : 'no'));
-        return false;
-    }
-
-    $customer = new YITH_YWF_Customer($dealer_id);
-    $current = (float) $customer->get_funds();
-    $customer->set_funds($current + $amount); // positive = credit, dealer owes less
-
-    global $wpdb;
-    $desc = $cr_number . ' (re: ZAU' . $order_id . ')';
-    if ($reason) $desc .= ' - ' . $reason;
-    if ($editor_name) $desc .= ' (by ' . $editor_name . ')';
-
-    $wpdb->insert($wpdb->prefix . 'ywf_user_fund_log', [
-        'order_id'       => (int) $order_id,
-        'user_id'        => $dealer_id,
-        'editor_id'      => get_current_user_id(),
-        'fund_user'      => (string) round($amount, 2),
-        'type_operation' => 'adjustment',
-        'description'    => $desc,
-        'date_added'     => gmdate('Y-m-d H:i:s'),
-    ]);
-
-    if ($wpdb->last_error) {
-        error_log('zeekr CR ' . $cr_number . ': fund_log insert failed: ' . $wpdb->last_error);
-        return false;
-    }
-
-    return true;
-}
-
-/**
- * Core: issue a credit note against an order. Does NOT touch the original invoice.
- *
- * @param WC_Order $order
- * @param array    $cr_lines Each: ['item_id'=>int, 'qty'=>int, 'return_to_stock'=>bool].
- * @param array    $opts     ['reason'=>, 'note'=>, 'source'=>'manual'|'short_ship',
- *                            'issued_by'=>user_id, 'issued_by_name'=>string].
- * @return array|WP_Error
- */
-function zeekr_create_credit_note($order, $cr_lines, $opts = []) {
-    if (!($order instanceof WC_Order)) return new WP_Error('cr_no_order', 'Invalid order');
-
-    global $wpdb;
-
-    $order_id       = $order->get_id();
-    $reason         = isset($opts['reason']) ? sanitize_text_field($opts['reason']) : '';
-    $note           = isset($opts['note']) ? sanitize_textarea_field($opts['note']) : '';
-    $source         = isset($opts['source']) ? sanitize_key($opts['source']) : 'manual';
-    $issued_by      = isset($opts['issued_by']) ? (int) $opts['issued_by'] : get_current_user_id();
-    $issued_by_name = isset($opts['issued_by_name']) ? sanitize_text_field($opts['issued_by_name']) : '';
-
-    // Serialize ALL credit-note creation for THIS order, so a double-submit or race
-    // cannot both read the same "already credited" cap and double-credit the dealer.
-    // (Assumes MySQL 5.7+/MariaDB 10.0.2+ which allow holding multiple named locks
-    //  per session — the inner sequence lock is acquired/released within this scope.)
-    $order_lock = 'zeekr_cr_o_' . $order_id;
-    $got_lock = (int) $wpdb->get_var($wpdb->prepare("SELECT GET_LOCK(%s, 10)", $order_lock));
-
-    try {
-        // Cap creditable qty per line: original - already credited - legacy WC refunds.
-        $credited_map = zeekr_get_order_credited_qty_map($order_id);
-        $refunded_map = [];
-        foreach ($order->get_refunds() as $rf) {
-            foreach ($rf->get_items() as $rfi) {
-                $rid = $rfi->get_meta('_refunded_item_id');
-                if ($rid) $refunded_map[$rid] = ($refunded_map[$rid] ?? 0) + abs($rfi->get_quantity());
-            }
-        }
-
-        $items = [];
-        $total_ex = 0;
-        $total_tax = 0;
-
-        foreach ($cr_lines as $ln) {
-            $item_id = (int) ($ln['item_id'] ?? 0);
-            $qty     = (int) ($ln['qty'] ?? 0);
-            $rts     = !empty($ln['return_to_stock']);
-            if ($qty <= 0) continue;
-
-            $item = $order->get_item($item_id);
-            if (!$item) continue;
-
-            $original_qty = $item->get_quantity();
-            if ($original_qty <= 0) continue;
-
-            $already = ($credited_map[$item_id] ?? 0) + ($refunded_map[$item_id] ?? 0);
-            $max = $original_qty - $already;
-            if ($qty > $max) $qty = $max;
-            if ($qty <= 0) continue;
-
-            $proportion = $qty / $original_qty;
-            $line_ex  = round((float) $item->get_total() * $proportion, 2);
-            $line_tax = round((float) $item->get_total_tax() * $proportion, 2);
-            $product  = $item->get_product();
-
-            $items[] = [
-                'item_id'        => $item_id,
-                'sku'            => $product ? $product->get_sku() : '',
-                'name'           => $item->get_name(),
-                'qty'            => $qty,
-                'amount_ex_gst'  => $line_ex,
-                'amount_tax'     => $line_tax,
-                'amount_inc_gst' => round($line_ex + $line_tax, 2),
-                'return_to_stock' => $rts,
-                'product_id'     => $product ? $product->get_id() : 0,
-            ];
-            $total_ex  += $line_ex;
-            $total_tax += $line_tax;
-        }
-
-        if (empty($items)) return new WP_Error('cr_no_items', 'No creditable items (already fully credited/refunded?)');
-
-        $total_ex  = round($total_ex, 2);
-        $total_tax = round($total_tax, 2);
-        $total_inc = round($total_ex + $total_tax, 2);
-
-        $seq       = zeekr_get_next_credit_note_number();
-        $cr_number = zeekr_format_credit_note_number($seq);
-        $dealer_id = $order->get_customer_id();
-
-        $wpdb->insert($wpdb->prefix . 'dealer_credit_notes', [
-            'cr_number'       => $cr_number,
-            'cr_seq'          => $seq,
-            'source_order_id' => $order_id,
-            'dealer_id'       => $dealer_id,
-            'reason'          => $reason,
-            'note'            => $note,
-            'items'           => wp_json_encode($items),
-            'total_ex_gst'    => $total_ex,
-            'gst'             => $total_tax,
-            'total_inc_gst'   => $total_inc,
-            'issued_by'       => $issued_by,
-            'issued_by_name'  => $issued_by_name,
-            'source'          => $source,
-            'created_at'      => current_time('mysql'),
-        ]);
-        if ($wpdb->last_error) return new WP_Error('cr_db', 'DB error: ' . $wpdb->last_error);
-        $cr_id = (int) $wpdb->insert_id;
-
-        // Return parts to stock per-line (operator choice).
-        foreach ($items as $it) {
-            if (!empty($it['return_to_stock']) && $it['product_id']) {
-                $product = wc_get_product($it['product_id']);
-                if ($product && $product->managing_stock()) {
-                    wc_update_product_stock($product, $it['qty'], 'increase');
-                } else {
-                    error_log(sprintf('zeekr CR %s: return-to-stock requested but product %d not managing stock; %d units NOT restocked', $cr_number, (int) $it['product_id'], (int) $it['qty']));
-                }
-            }
-        }
-
-        // Credit dealer's account balance + statement.
-        $funds_ok = true;
-        if ($dealer_id) {
-            $funds_ok = zeekr_credit_note_apply_funds($dealer_id, $total_inc, $order_id, $cr_number, $reason, $issued_by_name);
-        }
-
-        // Tag the order (badge / lookup) and add a note — but do NOT change status or invoice.
-        $order->update_meta_data('_has_credit_note', 'yes');
-        $order->add_order_note(sprintf(
-            'Credit Note %s issued by %s: $%s incl. GST (%s).%s',
-            $cr_number,
-            $issued_by_name ?: 'system',
-            number_format($total_inc, 2),
-            $reason ?: 'no reason given',
-            $funds_ok ? '' : ' WARNING: dealer account credit FAILED to apply — apply manually.'
-        ));
-        $order->save();
-
-        return [
-            'id'            => $cr_id,
-            'cr_number'     => $cr_number,
-            'cr_seq'        => $seq,
-            'total_ex_gst'  => $total_ex,
-            'gst'           => $total_tax,
-            'total_inc_gst' => $total_inc,
-            'items'         => $items,
-            'funds_applied' => $funds_ok,
-        ];
-    } finally {
-        if ($got_lock === 1) {
-            $wpdb->query($wpdb->prepare("SELECT RELEASE_LOCK(%s)", $order_lock));
-        }
-    }
-}
-
-/**
- * AJAX: Zeekr Admin issues a credit note against an order (replaces refund).
- */
-add_action('wp_ajax_zeekr_issue_credit_note', function() {
-    check_ajax_referer('zeekr_issue_credit_note', 'nonce');
-
-    $user = wp_get_current_user();
-    if (!in_array('zeekr_admin', (array) $user->roles) && !in_array('administrator', (array) $user->roles)) {
-        wp_send_json_error(['message' => 'Permission denied']);
-        return;
-    }
-
-    $order_id = intval($_POST['order_id'] ?? 0);
-    $order = $order_id ? wc_get_order($order_id) : null;
-    if (!$order) {
-        wp_send_json_error(['message' => 'Order not found']);
-        return;
-    }
-
-    // Same eligibility as the old refund flow.
-    $creditable_statuses = ['completed', 'processing', 'sent', 'received', 'partial-refund'];
-    if (!in_array($order->get_status(), $creditable_statuses)) {
-        wp_send_json_error(['message' => 'Credit note cannot be issued for status: ' . $order->get_status()]);
-        return;
-    }
-
-    $items = json_decode(stripslashes($_POST['items'] ?? ''), true);
-    if (empty($items) || !is_array($items)) {
-        wp_send_json_error(['message' => 'No items selected for credit note']);
-        return;
-    }
-
-    $cr_lines = [];
-    foreach ($items as $it) {
-        $cr_lines[] = [
-            'item_id'         => intval($it['item_id'] ?? 0),
-            'qty'             => intval($it['qty'] ?? 0),
-            'return_to_stock' => !empty($it['return_to_stock']),
-        ];
-    }
-
-    $result = zeekr_create_credit_note($order, $cr_lines, [
-        'reason'         => sanitize_text_field($_POST['reason'] ?? ''),
-        'note'           => sanitize_textarea_field($_POST['note'] ?? ''),
-        'source'         => 'manual',
-        'issued_by'      => $user->ID,
-        'issued_by_name' => $user->display_name,
-    ]);
-
-    if (is_wp_error($result)) {
-        wp_send_json_error(['message' => $result->get_error_message()]);
-        return;
-    }
-
-    wp_send_json_success([
-        'message'       => 'Credit Note ' . $result['cr_number'] . ' issued. $' . number_format($result['total_inc_gst'], 2) . ' credited to dealer account.',
-        'cr_number'     => $result['cr_number'],
-        'total_inc_gst' => $result['total_inc_gst'],
-        'print_url'     => add_query_arg('zeekr_print_credit_note', rawurlencode($result['cr_number']), home_url('/')),
-    ]);
-});
-
-/**
- * AJAX: list credit notes — either for one order (order_id) or as a register
- * (dealer_id + date range). Zeekr Admin only.
- */
-add_action('wp_ajax_zeekr_get_credit_notes', function() {
-    check_ajax_referer('zeekr_get_credit_notes', 'nonce');
-
-    $user = wp_get_current_user();
-    if (!in_array('zeekr_admin', (array) $user->roles) && !in_array('administrator', (array) $user->roles)) {
-        wp_send_json_error(['message' => 'Permission denied']);
-        return;
-    }
-
-    global $wpdb;
-    $table = $wpdb->prefix . 'dealer_credit_notes';
-
-    $order_id = intval($_POST['order_id'] ?? 0);
-    $where = '1=1';
-    $params = [];
-
-    if ($order_id) {
-        $where .= ' AND source_order_id = %d';
-        $params[] = $order_id;
-    } else {
-        $dealer_id = intval($_POST['dealer_id'] ?? 0);
-        if ($dealer_id > 0) {
-            $where .= ' AND dealer_id = %d';
-            $params[] = $dealer_id;
-        }
-        $df = sanitize_text_field($_POST['date_from'] ?? '');
-        $dt = sanitize_text_field($_POST['date_to'] ?? '');
-        if ($df && $dt) {
-            $where .= ' AND created_at >= %s AND created_at <= %s';
-            $params[] = $df . ' 00:00:00';
-            $params[] = $dt . ' 23:59:59';
-        }
-    }
-
-    $sql = "SELECT * FROM $table WHERE $where ORDER BY cr_seq DESC";
-    $rows = $params ? $wpdb->get_results($wpdb->prepare($sql, $params)) : $wpdb->get_results($sql);
-
-    $out = [];
-    foreach ($rows as $r) {
-        $dealer_user = get_userdata($r->dealer_id);
-        $dealer_name = get_user_meta($r->dealer_id, 'dealer_dealer_company_name', true);
-        if (empty($dealer_name)) $dealer_name = $dealer_user ? $dealer_user->display_name : 'Unknown';
-
-        $out[] = [
-            'cr_number'      => $r->cr_number,
-            'source_order_id' => (int) $r->source_order_id,
-            'invoice_number' => 'ZAU' . $r->source_order_id,
-            'dealer_id'      => (int) $r->dealer_id,
-            'dealer_name'    => $dealer_name,
-            'reason'         => $r->reason,
-            'note'           => $r->note,
-            'items'          => json_decode($r->items, true),
-            'total_ex_gst'   => (float) $r->total_ex_gst,
-            'gst'            => (float) $r->gst,
-            'total_inc_gst'  => (float) $r->total_inc_gst,
-            'issued_by_name' => $r->issued_by_name,
-            'source'         => $r->source,
-            'date'           => $r->created_at,
-            'print_url'      => add_query_arg('zeekr_print_credit_note', rawurlencode($r->cr_number), home_url('/')),
-        ];
-    }
-
-    wp_send_json_success(['credit_notes' => $out, 'count' => count($out)]);
-});
-
-/**
- * Render a standalone printable credit note document (browser print -> Save as PDF).
- * Mirrors the invoice layout but with a CREDIT NOTE header, negative values, and a
- * reference back to the original tax invoice.
- */
-function zeekr_render_credit_note_document($cr) {
-    $items = json_decode($cr->items, true);
-    if (!is_array($items)) $items = [];
-
-    $logo_url = DEALER_SYSTEM_URL . 'dist/Zeekr logo & address.png';
-    $invoice_no = 'ZAU' . $cr->source_order_id;
-
-    // Dealer details
-    $dealer_id = (int) $cr->dealer_id;
-    $company = get_user_meta($dealer_id, 'dealer_dealer_company_name', true);
-    $dealer_user = get_userdata($dealer_id);
-    if (empty($company) && $dealer_user) $company = $dealer_user->display_name;
-    $abn = get_user_meta($dealer_id, 'dealer_dealer_abn', true) ?: '';
-    $address = get_user_meta($dealer_id, 'dealer_delivery_address_full', true) ?: '';
-    $suburb = get_user_meta($dealer_id, 'dealer_suburb', true) ?: '';
-    $state = get_user_meta($dealer_id, 'dealer_state', true) ?: '';
-    $post_code = get_user_meta($dealer_id, 'dealer_post_code', true) ?: '';
-    $addr_line2 = trim(implode(' ', array_filter([$suburb, $state, $post_code])));
-
-    $order = wc_get_order($cr->source_order_id);
-    $inv_date = $order && $order->get_date_created() ? $order->get_date_created()->date('Y-m-d') : '';
-    $cr_date = $cr->created_at ? date('Y-m-d', strtotime($cr->created_at)) : '';
-
-    header('Content-Type: text/html; charset=utf-8');
-    ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Credit Note <?php echo esc_html($cr->cr_number); ?></title>
-<style>
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #111827; margin: 0; padding: 24px; font-size: 13px; }
-    .cn-wrap { max-width: 800px; margin: 0 auto; }
-    .cn-logo { max-width: 320px; height: auto; }
-    .cn-title { color: #dc2626; font-size: 22px; font-weight: 700; letter-spacing: 1px; margin: 4px 0 0; text-align: right; }
-    .cn-meta { text-align: right; font-size: 13px; margin-top: 4px; }
-    .cn-meta strong { font-weight: 600; }
-    .cn-parties { display: flex; justify-content: space-between; gap: 24px; margin: 24px 0; }
-    .cn-parties h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #6b7280; }
-    .cn-ref { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; color: #991b1b; font-weight: 500; }
-    table.cn-items { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    table.cn-items th { text-align: left; padding: 8px; border-bottom: 2px solid #111827; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; color: #374151; }
-    table.cn-items td { padding: 8px; border-bottom: 1px solid #f3f4f6; }
-    table.cn-items td.num, table.cn-items th.num { text-align: right; }
-    .cn-totals { margin-top: 16px; margin-left: auto; width: 320px; }
-    .cn-totals .row { display: flex; justify-content: space-between; padding: 6px 0; }
-    .cn-totals .grand { border-top: 2px solid #111827; margin-top: 6px; padding-top: 10px; font-weight: 700; font-size: 15px; color: #dc2626; }
-    .cn-neg { color: #dc2626; }
-    .cn-print-btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; background: #111827; color: #fff; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; margin-bottom: 16px; }
-    @media print {
-        @page { size: A4; margin: 12mm 10mm 15mm 10mm; }
-        .cn-print-btn { display: none; }
-        body { padding: 0; }
-    }
-</style>
-</head>
-<body>
-<div class="cn-wrap">
-    <button class="cn-print-btn" onclick="window.print()">Print / Save as PDF</button>
-    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:24px;">
-        <img class="cn-logo" src="<?php echo esc_url($logo_url); ?>" alt="ZEEKR">
-        <div>
-            <div class="cn-title">CREDIT NOTE</div>
-            <div class="cn-meta"><strong><?php echo esc_html($cr->cr_number); ?></strong></div>
-            <div class="cn-meta">Date: <?php echo esc_html($cr_date); ?></div>
-        </div>
-    </div>
-
-    <div class="cn-ref">This credit note relates to Tax Invoice <strong><?php echo esc_html($invoice_no); ?></strong><?php echo $inv_date ? ' dated ' . esc_html($inv_date) : ''; ?>. The original tax invoice is unchanged.</div>
-
-    <div class="cn-parties">
-        <div>
-            <h4>Credit To</h4>
-            <div style="font-weight:600;"><?php echo esc_html($company); ?></div>
-            <?php if ($address): ?><div><?php echo esc_html($address); ?></div><?php endif; ?>
-            <?php if ($addr_line2): ?><div><?php echo esc_html($addr_line2); ?></div><?php endif; ?>
-            <?php if ($abn): ?><div>ABN: <?php echo esc_html($abn); ?></div><?php endif; ?>
-        </div>
-        <div style="text-align:right;">
-            <h4>Reason</h4>
-            <div><?php echo esc_html($cr->reason ?: '—'); ?></div>
-            <?php if (!empty($cr->note)): ?><div style="color:#6b7280; margin-top:4px;"><?php echo esc_html($cr->note); ?></div><?php endif; ?>
-            <?php if (!empty($cr->issued_by_name)): ?><div style="color:#6b7280; margin-top:4px;">Issued by <?php echo esc_html($cr->issued_by_name); ?></div><?php endif; ?>
-        </div>
-    </div>
-
-    <table class="cn-items">
-        <thead>
-            <tr>
-                <th>Part Number</th>
-                <th>Description</th>
-                <th class="num">Qty</th>
-                <th class="num">Unit (ex. GST)</th>
-                <th class="num">Amount (ex. GST)</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php foreach ($items as $it):
-                $qty = (int) ($it['qty'] ?? 0);
-                $ex = (float) ($it['amount_ex_gst'] ?? 0);
-                $unit = $qty > 0 ? $ex / $qty : 0;
-            ?>
-            <tr>
-                <td style="font-family:monospace;"><?php echo esc_html($it['sku'] ?? '—'); ?></td>
-                <td><?php echo esc_html($it['name'] ?? ''); ?></td>
-                <td class="num">-<?php echo esc_html($qty); ?></td>
-                <td class="num">$<?php echo number_format($unit, 2); ?></td>
-                <td class="num cn-neg">-$<?php echo number_format($ex, 2); ?></td>
-            </tr>
-            <?php endforeach; ?>
-        </tbody>
-    </table>
-
-    <div class="cn-totals">
-        <div class="row"><span>Subtotal (ex. GST)</span><span class="cn-neg">-$<?php echo number_format((float) $cr->total_ex_gst, 2); ?></span></div>
-        <div class="row"><span>GST</span><span class="cn-neg">-$<?php echo number_format((float) $cr->gst, 2); ?></span></div>
-        <div class="row grand"><span>Total Credit (inc. GST)</span><span>-$<?php echo number_format((float) $cr->total_inc_gst, 2); ?></span></div>
-    </div>
-</div>
-</body>
-</html>
-    <?php
-}
-
-/**
- * Serve the printable credit note at /?zeekr_print_credit_note=CR-00001.
- * Visible to the issuing side (admins) and the owning dealer.
- */
-add_action('template_redirect', function() {
-    if (empty($_GET['zeekr_print_credit_note'])) return;
-
-    $cr_number = sanitize_text_field(wp_unslash($_GET['zeekr_print_credit_note']));
-
-    global $wpdb;
-    $table = $wpdb->prefix . 'dealer_credit_notes';
-    $cr = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table WHERE cr_number = %s", $cr_number));
-    if (!$cr) wp_die('Credit note not found.');
-
-    $user = wp_get_current_user();
-    $is_admin = in_array('zeekr_admin', (array) $user->roles) || in_array('administrator', (array) $user->roles);
-    $is_owner = ((int) $user->ID === (int) $cr->dealer_id);
-    if (!$is_admin && !$is_owner) wp_die('Permission denied.');
-
-    zeekr_render_credit_note_document($cr);
-    exit;
 });
 
 /**
@@ -6640,46 +5920,6 @@ add_action('wp_ajax_zeekr_get_tax_invoice_report', function() {
         ];
     }
 
-    // Append credit notes for the same range as negative ledger rows (CR documents).
-    // The original tax invoices above are unchanged; credit notes net the totals.
-    global $wpdb;
-    $cn_table = $wpdb->prefix . 'dealer_credit_notes';
-    $cn_where = 'created_at >= %s AND created_at <= %s';
-    $cn_params = [$date_from . ' 00:00:00', $date_to . ' 23:59:59'];
-    if ($dealer_id > 0) {
-        $cn_where .= ' AND dealer_id = %d';
-        $cn_params[] = $dealer_id;
-    }
-    $cn_rows = $wpdb->get_results($wpdb->prepare(
-        "SELECT * FROM $cn_table WHERE $cn_where ORDER BY cr_seq ASC",
-        $cn_params
-    ));
-    foreach ($cn_rows as $cn) {
-        $cn_company = get_user_meta($cn->dealer_id, 'dealer_dealer_company_name', true);
-        if (empty($cn_company)) {
-            $cn_user = get_userdata($cn->dealer_id);
-            $cn_company = $cn_user ? $cn_user->display_name : '';
-        }
-        $cn_qty = 0;
-        $cn_items = json_decode($cn->items, true);
-        if (is_array($cn_items)) {
-            foreach ($cn_items as $ci) $cn_qty += (int) ($ci['qty'] ?? 0);
-        }
-        $rows[] = [
-            'type'           => 'Credit Note',
-            'invoice_no'     => $cn->cr_number,
-            'item'           => 'credit note',
-            'credit_against' => 'ZAU' . $cn->source_order_id,
-            'quantity'       => -$cn_qty,
-            'total_ex_gst'   => -round((float) $cn->total_ex_gst, 2),
-            'gst'            => -round((float) $cn->gst, 2),
-            'total_inc_gst'  => -round((float) $cn->total_inc_gst, 2),
-            'customer_name'  => $cn_company,
-            'order_id'       => (int) $cn->source_order_id,
-            'date'           => $cn->created_at ? date('Y-m-d', strtotime($cn->created_at)) : '',
-        ];
-    }
-
     // Totals
     $total_ex_gst_sum = array_sum(array_column($rows, 'total_ex_gst'));
     $total_gst_sum = array_sum(array_column($rows, 'gst'));
@@ -6953,9 +6193,6 @@ add_action('wp_ajax_zeekr_get_analytics', function() {
 
     $orders = wc_get_orders($args);
 
-    // Batch-fetch credit-note totals per order (one query, not N) to net them out below.
-    $credit_map = zeekr_get_credit_totals_map_for_orders(array_map(function($o) { return $o->get_id(); }, $orders));
-
     // Local-date boundaries for filtering
     $local_after = $after_date->format('Y-m-d');
     $local_before = $before_date->format('Y-m-d');
@@ -7026,11 +6263,8 @@ add_action('wp_ajax_zeekr_get_analytics', function() {
         $tax = (float) $order->get_total_tax();
         $shipping = (float) $order->get_shipping_total() / 1.1;
         $discount = (float) $order->get_discount_total();
-        // Net out legacy WC refunds AND credit notes (ex-GST). Credit notes replaced
-        // refunds, so get_total_refunded() is 0 for new orders — credit notes carry it.
         $refund = (float) $order->get_total_refunded() / 1.1;
-        $credit_note = $credit_map[$order->get_id()] ?? 0;
-        $net_revenue = $gross_sales - $refund - $credit_note;
+        $net_revenue = $gross_sales - $refund;
 
         // Count items excluding backorder line items (consistent with products tab)
         $items_count = 0;
@@ -7154,9 +6388,6 @@ add_action('wp_ajax_zeekr_get_orders_analytics', function() {
 
     $orders = wc_get_orders($args);
 
-    // Batch-fetch credit-note totals per order (one query, not N) to net them out below.
-    $credit_map = zeekr_get_credit_totals_map_for_orders(array_map(function($o) { return $o->get_id(); }, $orders));
-
     // Local-date boundaries for filtering
     $local_after = $after_date->format('Y-m-d');
     $local_before = $before_date->format('Y-m-d');
@@ -7189,8 +6420,7 @@ add_action('wp_ajax_zeekr_get_orders_analytics', function() {
         $order_total = (float) $order->get_total();
         $gross_sales = $order_total / 1.1;
         $refund = (float) $order->get_total_refunded() / 1.1;
-        $credit_note = $credit_map[$order->get_id()] ?? 0;
-        $net_sales = $gross_sales - $refund - $credit_note;
+        $net_sales = $gross_sales - $refund;
         $status = $order->get_status();
 
         // Count items excluding backorder line items (consistent with products tab)
@@ -9715,7 +8945,6 @@ add_action('wp_ajax_warehouse_get_order_detail', function() {
         'con_note' => $order->get_meta('_transport_con_note') ?: '',
         'sales_order_number' => $order->get_meta('_sales_order_number') ?: '',
         'refund_summary' => $order->get_meta('_refund_summary') ? json_decode($order->get_meta('_refund_summary'), true) : [],
-        'credit_notes' => zeekr_get_order_credit_notes_for_display($order->get_id()),
     ];
 
     wp_send_json_success([
@@ -9932,43 +9161,87 @@ add_action('wp_ajax_warehouse_short_ship', function() {
     $shorted_qty = $ordered_qty - $shipped_qty;
 
     try {
-        // Issue a credit note for the shorted qty. The original tax invoice is NOT
-        // altered — the paid line stays at full qty; a credit note offsets the
-        // shorted portion, and the dealer is re-charged when the backorder is
-        // fulfilled. (Net cash flow is identical to the old refund-based flow.)
-        $product = $item->get_product();
+        // Calculate proportional refund
+        $item_total = (float) $item->get_total();
+        $item_tax   = (float) $item->get_total_tax();
+        $proportion = $shorted_qty / $ordered_qty;
 
-        $cr = zeekr_create_credit_note($order, [[
-            'item_id'         => $item_id,
-            'qty'             => $shorted_qty,
-            'return_to_stock' => false, // stock was deducted at order time; goods go to backorder
-        ]], [
-            'reason'         => 'Short ship — shipped ' . $shipped_qty . ' of ' . $ordered_qty,
-            'source'         => 'short_ship',
-            'issued_by'      => $user->ID,
-            'issued_by_name' => $user->display_name,
+        $refund_total = round($item_total * $proportion, 2);
+        $refund_tax_amount = round($item_tax * $proportion, 2);
+
+        // Build refund tax array
+        $tax_data = $item->get_taxes();
+        $refund_tax = [];
+        if (!empty($tax_data['total']) && is_array($tax_data['total'])) {
+            foreach ($tax_data['total'] as $tax_id => $tax_val) {
+                $refund_tax[$tax_id] = round((float)$tax_val * $proportion, 2);
+            }
+        }
+
+        $refund_amount = round($refund_total + $refund_tax_amount, 2);
+
+        $line_items = [
+            $item_id => [
+                'qty'          => $shorted_qty,
+                'refund_total' => $refund_total,
+                'refund_tax'   => $refund_tax,
+            ],
+        ];
+
+        // Create WC refund (restock_items false — stock already deducted at order time)
+        $refund = wc_create_refund([
+            'amount'        => $refund_amount,
+            'reason'        => 'Short ship by ' . $user->display_name . ' — shipped ' . $shipped_qty . ' of ' . $ordered_qty,
+            'order_id'      => $order_id,
+            'line_items'    => $line_items,
+            'restock_items' => false,
         ]);
 
-        if (is_wp_error($cr)) {
-            wp_send_json_error(['message' => 'Credit note failed: ' . $cr->get_error_message()]);
+        if (is_wp_error($refund)) {
+            wp_send_json_error(['message' => 'Refund failed: ' . $refund->get_error_message()]);
             return;
         }
 
-        // Reload order (credit note added meta + note) before adding the backorder line.
+        // Reload order from DB
         $order = wc_get_order($order_id);
-        if (!$order) {
-            wp_send_json_error(['message' => 'Credit Note ' . $cr['cr_number'] . ' was issued, but the order could not be reloaded to create the backorder line. Please add the backorder manually.']);
-            return;
-        }
         $item  = $order->get_item($item_id);
-        if ($item) $product = $item->get_product();
 
-        // Add a $0 backorder line for the shorted qty so it can be fulfilled later.
-        // The original (paid) line is left untouched — invoice total unchanged.
+        // Update original line item qty and totals to shipped amount
+        $shipped_proportion = $shipped_qty / $ordered_qty;
+        $new_total = round($item_total * $shipped_proportion, 2);
+        $new_tax   = round($item_tax * $shipped_proportion, 2);
+
+        $item->set_quantity($shipped_qty);
+        $item->set_total($new_total);
+        $item->set_subtotal($new_total);
+
+        // Update tax totals
+        $taxes = $item->get_taxes();
+        if (!empty($taxes['total']) && is_array($taxes['total'])) {
+            $new_taxes = $taxes;
+            foreach ($taxes['total'] as $tid => $tval) {
+                $new_taxes['total'][$tid] = round((float)$tval * $shipped_proportion, 2);
+            }
+            if (!empty($taxes['subtotal']) && is_array($taxes['subtotal'])) {
+                foreach ($taxes['subtotal'] as $tid => $tval) {
+                    $new_taxes['subtotal'][$tid] = round((float)$tval * $shipped_proportion, 2);
+                }
+            }
+            $item->set_taxes($new_taxes);
+        }
+        $item->save();
+
+        // Credit dealer balance
+        $customer_id = $order->get_customer_id();
+        if ($customer_id) {
+            dealer_restore_funds($customer_id, $refund_amount, $order->get_id(), 'Shorted item adjustment');
+        }
+
+        // Add backorder line items for the shorted qty
+        $product = $item->get_product();
         if ($product) {
-            $order_type     = $item ? ($item->get_meta('_dealer_order_type') ?: 'stock_order') : 'stock_order';
-            $item_total     = (float) ($item ? $item->get_total() : 0);
-            $original_price = $ordered_qty > 0 ? $item_total / $ordered_qty : 0; // unit price excl tax
+            $order_type = $item->get_meta('_dealer_order_type') ?: 'stock_order';
+            $original_price = $item_total / $ordered_qty; // unit price excl tax
 
             $new_item_id = $order->add_product($product, $shorted_qty, [
                 'total'    => 0,
@@ -9983,32 +9256,51 @@ add_action('wp_ajax_warehouse_short_ship', function() {
             }
         }
 
-        // Do NOT call calculate_totals() — the original paid line must stay EXACTLY as
-        // invoiced (honouring "the invoice is never altered"). The $0 backorder line
-        // contributes nothing, so the order total is provably unchanged; recalculating
-        // could re-group taxes and shift the total by a rounding cent.
+        // Recalculate order totals
+        $order->calculate_totals();
+
+        // Append to refund summary
+        $existing_summary = $order->get_meta('_refund_summary');
+        $summary = !empty($existing_summary) ? json_decode($existing_summary, true) : [];
+        if (!is_array($summary)) $summary = [];
+
+        $summary[] = [
+            'date'           => current_time('Y-m-d H:i'),
+            'admin'          => $user->display_name,
+            'type'           => 'short_ship',
+            'item_id'        => $item->get_id(),
+            'items'          => [
+                [
+                    'sku'    => $product ? $product->get_sku() : '',
+                    'name'   => $item->get_name(),
+                    'qty'    => $shorted_qty,
+                    'amount' => $refund_total,
+                ],
+            ],
+            'total'          => $refund_amount,
+            'total_excl_gst' => $refund_total,
+        ];
+        $order->update_meta_data('_refund_summary', json_encode($summary));
         $order->save();
 
         // Add order note
         $order->add_order_note(
-            sprintf('Short Ship by %s: %s (SKU: %s) — shipped %d of %d. Credit Note %s issued for $%s (incl. GST). Backorder created for %d units.',
+            sprintf('Short Ship by %s: %s (SKU: %s) — shipped %d of %d, refunded $%s (incl. GST). Backorder created for %d units.',
                 $user->display_name,
-                $item ? $item->get_name() : '',
+                $item->get_name(),
                 $product ? $product->get_sku() : 'N/A',
                 $shipped_qty,
                 $ordered_qty,
-                $cr['cr_number'],
-                number_format($cr['total_inc_gst'], 2),
+                number_format($refund_amount, 2),
                 $shorted_qty
             )
         );
 
         wp_send_json_success([
-            'message'       => 'Short ship processed. Credit Note ' . $cr['cr_number'] . ' issued for $' . number_format($cr['total_inc_gst'], 2) . ' and backorder created for ' . $shorted_qty . ' units.',
-            'cr_number'     => $cr['cr_number'],
-            'credit_amount' => $cr['total_inc_gst'],
-            'shipped_qty'   => $shipped_qty,
-            'shorted_qty'   => $shorted_qty,
+            'message'     => 'Short ship processed successfully. Refunded $' . number_format($refund_amount, 2) . ' and created backorder for ' . $shorted_qty . ' units.',
+            'refund_amount' => $refund_amount,
+            'shipped_qty' => $shipped_qty,
+            'shorted_qty' => $shorted_qty,
         ]);
 
     } catch (Exception $e) {

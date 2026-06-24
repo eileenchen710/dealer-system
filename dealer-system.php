@@ -3057,6 +3057,27 @@ add_action('woocommerce_order_status_pending', function($order_id) {
     dealer_process_new_backorder_order($order);
 }, 20);
 
+// Prevent double stock deduction on backorder-fulfillment orders.
+//
+// Backorder fulfillment (see wp_ajax_warehouse_fulfill_backorder handler) deducts
+// stock manually at fulfillment time via $product->set_stock_quantity(). It does NOT
+// set the order's _order_stock_reduced flag. Without this filter, WooCommerce's
+// wc_maybe_reduce_stock_levels() (hooked to processing/completed/on-hold/payment_complete)
+// sees the flag unset and reduces stock a SECOND time when the warehouse moves the
+// order to "processing"/"completed" — driving stock negative (e.g. 3 → 0 → -3).
+//
+// Returning false here makes WooCommerce skip its automatic reduction for these orders
+// WITHOUT setting _order_stock_reduced, so the manual restore in the undo path stays the
+// single source of truth (the cancel hook wc_maybe_increase_stock_levels also gates on
+// that flag and therefore won't double-restore).
+add_filter('woocommerce_payment_complete_reduce_order_stock', function($reduce, $order_id) {
+    $order = wc_get_order($order_id);
+    if ($order && $order->get_meta('_backorder_source_order')) {
+        return false;
+    }
+    return $reduce;
+}, 10, 2);
+
 /**
  * Handle "Order Again" - check inventory and mark backorder items
  */
@@ -4107,7 +4128,6 @@ add_action('wp_ajax_zeekr_get_orders', function() {
     $excluded_statuses = ['checkout-draft', 'auto-draft', 'trash', 'draft'];
 
     $args = [
-        'limit' => -1, // fetch all; pagination applied after post-filtering (search, status exclusions)
         'orderby' => 'date',
         'order' => 'DESC',
         'type' => 'shop_order',
@@ -4126,7 +4146,31 @@ add_action('wp_ajax_zeekr_get_orders', function() {
         );
     }
 
-    $orders = wc_get_orders($args);
+    // Free-text search matches dealer name/company in PHP, so it still needs to
+    // scan all matching orders. Everything else (default load, status filter,
+    // dealer filter) paginates at the DB level — hydrating only the current page
+    // instead of all orders on every request (which grew to ~6s as orders piled up).
+    $db_paginated = empty($search);
+    $db_total_count = 0;
+    $db_total_pages = 1;
+    if ($db_paginated) {
+        $args['limit']    = $per_page;
+        $args['paged']    = $page;
+        $args['paginate'] = true;
+        $result = wc_get_orders($args);
+        $db_total_count = (int) $result->total;
+        $db_total_pages = max(1, (int) $result->max_num_pages);
+        // Preserve the old clamp behaviour: a page past the end returns the last page.
+        if ($page > $db_total_pages) {
+            $page = $db_total_pages;
+            $args['paged'] = $page;
+            $result = wc_get_orders($args);
+        }
+        $orders = $result->orders;
+    } else {
+        $args['limit'] = -1;
+        $orders = wc_get_orders($args);
+    }
 
     // If searching by order ID (e.g. "ZAU3791" or "3791") and nothing matched above,
     // fall back to a direct order lookup in case the order status is outside the queried set.
@@ -4238,10 +4282,17 @@ add_action('wp_ajax_zeekr_get_orders', function() {
     }
 
     // Paginate the post-filtered list
-    $total_count = count($order_data);
-    $total_pages = max(1, (int) ceil($total_count / $per_page));
-    $page = min($page, $total_pages);
-    $paginated = array_slice($order_data, ($page - 1) * $per_page, $per_page);
+    if ($db_paginated) {
+        // Already paginated at the DB level — $order_data is exactly this page.
+        $total_count = $db_total_count;
+        $total_pages = $db_total_pages;
+        $paginated   = $order_data;
+    } else {
+        $total_count = count($order_data);
+        $total_pages = max(1, (int) ceil($total_count / $per_page));
+        $page        = min($page, $total_pages);
+        $paginated   = array_slice($order_data, ($page - 1) * $per_page, $per_page);
+    }
 
     wp_send_json_success([
         'orders' => $paginated,
@@ -7610,7 +7661,8 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
     }
 
     // Build per-product, per-day fresh-stock map from stock_adj_log
-    // (logs positive deltas only; excludes reserve adjustments)
+    // (logs positive deltas only; excludes reserve adjustments and bug-correction
+    //  adjustments, which are not real received stock)
     $adj_logs = get_posts([
         'post_type'      => 'stock_adj_log',
         'posts_per_page' => -1,
@@ -7625,7 +7677,7 @@ add_action('wp_ajax_zeekr_get_stock_movement', function() {
 
     foreach ($adj_logs as $log) {
         $type = get_post_meta($log->ID, '_sal_type', true);
-        if ($type === 'reserve') continue;
+        if ($type === 'reserve' || $type === 'correction') continue;
 
         $product_id = (int) get_post_meta($log->ID, '_sal_product_id', true);
         if (!$product_id) continue;
@@ -9490,24 +9542,77 @@ add_action('wp_ajax_warehouse_get_orders', function() {
     // Warehouse manager can only see these statuses
     $allowed_statuses = ['received', 'processing', 'completed', 'partial-refund', 'refunded'];
 
-    $args = [
-        'limit' => -1, // fetch all; pagination is applied after post-filtering (search, backorder-only skip)
-        'orderby' => 'date',
-        'order' => 'DESC',
-        'type' => 'shop_order',
-    ];
+    // Free-text search matches dealer name/company in PHP, so it still needs a full
+    // scan. The default load / status filter paginates at the DB level instead of
+    // loading all ~1,400 orders (which took ~7.5s and grows with order count).
+    $db_paginated = empty($search);
+    $db_total_count = 0;
+    $db_total_pages = 1;
 
-    if (!empty($status) && $status !== 'all' && in_array($status, $allowed_statuses)) {
-        $args['status'] = $status;
+    if ($db_paginated) {
+        // 1) Allowed-status order IDs in date DESC order (data store — reliable
+        //    ordering/status; we only fetch IDs here, not full order objects).
+        $status_arg = (!empty($status) && $status !== 'all' && in_array($status, $allowed_statuses))
+            ? [$status]
+            : $allowed_statuses;
+        $all_ids = array_map('intval', wc_get_orders([
+            'limit'   => -1,
+            'return'  => 'ids',
+            'orderby' => 'date',
+            'order'   => 'DESC',
+            'type'    => 'shop_order',
+            'status'  => $status_arg,
+        ]));
+
+        // 2) Drop backorder-only orders (the per-order skip below) via ONE bulk
+        //    line-item query: keep an order iff it has >=1 "real" line item — one
+        //    that is NOT on backorder AND NOT $0. This reproduces
+        //    dealer_order_is_backorder_only() exactly (verified equal across every
+        //    status) without hydrating every order. We derive it from line items
+        //    because the HPOS total_amount column is NOT reliably populated here.
+        global $wpdb;
+        $oi_table  = $wpdb->prefix . 'woocommerce_order_items';
+        $oim_table = $wpdb->prefix . 'woocommerce_order_itemmeta';
+        $keep_rows = $wpdb->get_col("
+            SELECT DISTINCT oi.order_id
+            FROM {$oi_table} oi
+            JOIN {$oim_table} mt ON mt.order_item_id = oi.order_item_id AND mt.meta_key = '_line_total'
+            LEFT JOIN {$oim_table} mb ON mb.order_item_id = oi.order_item_id AND mb.meta_key = '_is_backorder'
+            WHERE oi.order_item_type = 'line_item'
+              AND CAST(mt.meta_value AS DECIMAL(20,4)) <> 0
+              AND (mb.meta_value IS NULL OR mb.meta_value <> 'yes')
+        ");
+        $keep_set = array_fill_keys(array_map('intval', $keep_rows), true);
+        $kept_ids = array_values(array_filter($all_ids, function ($id) use ($keep_set) {
+            return isset($keep_set[$id]);
+        }));
+
+        // 3) Paginate the kept ID list; hydrate only the current page.
+        $db_total_count = count($kept_ids);
+        $db_total_pages = max(1, (int) ceil($db_total_count / $per_page));
+        if ($page > $db_total_pages) {
+            $page = $db_total_pages;
+        }
+        $page_ids = array_slice($kept_ids, ($page - 1) * $per_page, $per_page);
+        $orders = array_values(array_filter(array_map('wc_get_order', $page_ids)));
     } else {
-        // Only show allowed statuses for warehouse manager
-        $args['status'] = $allowed_statuses;
-    }
+        $args = [
+            'limit'   => -1, // search path scans (dealer name/company matched in PHP below)
+            'orderby' => 'date',
+            'order'   => 'DESC',
+            'type'    => 'shop_order',
+        ];
 
-    $orders = wc_get_orders($args);
+        if (!empty($status) && $status !== 'all' && in_array($status, $allowed_statuses)) {
+            $args['status'] = $status;
+        } else {
+            // Only show allowed statuses for warehouse manager
+            $args['status'] = $allowed_statuses;
+        }
 
-    // Direct order ID lookup fallback (e.g. "ZAU3791") in case status filter excludes it
-    if (!empty($search)) {
+        $orders = wc_get_orders($args);
+
+        // Direct order ID lookup fallback (e.g. "ZAU3791") in case status filter excludes it
         $clean_search = preg_replace('/^ZAU/i', '', $search);
         if (ctype_digit($clean_search)) {
             $direct = wc_get_order((int) $clean_search);
@@ -9628,10 +9733,17 @@ add_action('wp_ajax_warehouse_get_orders', function() {
     $received_count = count($received_orders);
 
     // Paginate the post-filtered list
-    $total_count = count($order_data);
-    $total_pages = max(1, (int) ceil($total_count / $per_page));
-    $page = min($page, $total_pages);
-    $paginated = array_slice($order_data, ($page - 1) * $per_page, $per_page);
+    if ($db_paginated) {
+        // Already paginated at the DB level — $order_data is exactly this page.
+        $total_count = $db_total_count;
+        $total_pages = $db_total_pages;
+        $paginated   = $order_data;
+    } else {
+        $total_count = count($order_data);
+        $total_pages = max(1, (int) ceil($total_count / $per_page));
+        $page        = min($page, $total_pages);
+        $paginated   = array_slice($order_data, ($page - 1) * $per_page, $per_page);
+    }
 
     wp_send_json_success([
         'orders' => $paginated,

@@ -3078,6 +3078,35 @@ add_filter('woocommerce_payment_complete_reduce_order_stock', function($reduce, 
     return $reduce;
 }, 10, 2);
 
+// ---------------------------------------------------------------------------
+// Bug fix (2026-06-29): Cancelled dealer orders were not restoring stock.
+//
+// Dealer orders reduce stock at CREATION time (Unpaid stage) via
+// wc_reduce_stock_levels() to prevent oversell. On these orders the HPOS
+// `order_stock_reduced` flag does NOT persist (it ends up 0), so WooCommerce's
+// wc_maybe_increase_stock_levels() — which gates on that flag — skips restoring
+// stock when the order is cancelled. Result: stock stays reduced forever and
+// drives totals negative (e.g. cancelled order #5383 took NFC/RADIO KEY stock
+// and never gave it back, leaving them at -9 / -12).
+//
+// Fix: on cancellation, restore stock directly from each line item's
+// `_reduced_stock` meta via wc_increase_stock_levels() — the per-item source of
+// truth. It is idempotent: it skips items whose `_reduced_stock` is empty and
+// deletes that meta after restoring, so it cannot double-restore alongside
+// WooCommerce core's own restore path (which also keys on `_reduced_stock`).
+// Backorder fulfillment orders are skipped: their stock is handled by the
+// manual undo path in the warehouse fulfill handler.
+add_action('woocommerce_order_status_cancelled', function($order_id) {
+    $order = wc_get_order($order_id);
+    if (!$order) {
+        return;
+    }
+    if ($order->get_meta('_backorder_source_order')) {
+        return;
+    }
+    wc_increase_stock_levels($order);
+}, 20);
+
 /**
  * Handle "Order Again" - check inventory and mark backorder items
  */
@@ -5476,7 +5505,11 @@ add_action('wp_ajax_zeekr_update_product', function() {
     $stock_changed = false;
     $new_qty = $old_qty;
     if (isset($_POST['stock']) && $_POST['stock'] !== '') {
-        $new_qty = intval($_POST['stock']);
+        // Floor manual stock input at 0: a human editing on-hand stock should
+        // never enter a negative value. Negative on-hand only ever arises from
+        // order deductions/oversell, not manual entry. This guards against typos
+        // like DOOR STOP / GLOVEBOX being set to -2 / -1 by hand (2026-06-29).
+        $new_qty = max(0, intval($_POST['stock']));
         $product->set_manage_stock(true);
         $product->set_stock_quantity($new_qty);
         $product->set_stock_status($new_qty > 0 ? 'instock' : 'onbackorder');

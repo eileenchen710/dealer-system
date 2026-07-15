@@ -5714,6 +5714,15 @@ add_action('wp_ajax_zeekr_get_part_history', function() {
         $order = wc_get_order($row->order_id);
         if (!$order) continue;
 
+        // Skip refund line items. Refund line items also have order_item_type
+        // 'line_item' and a _product_id, so they match the query above and
+        // wc_get_order() returns a WC_Order_Refund — which has no get_refunds().
+        // Without this guard the loop fatals at $order->get_refunds() below,
+        // returning a 500 that the UI renders as "No transactions found" for
+        // every part that was ever refunded (37 products at time of writing).
+        // Refunds are still captured via each parent order's get_refunds().
+        if ($order instanceof WC_Order_Refund) continue;
+
         // Skip trashed/cancelled unless refund
         $status = $order->get_status();
         if (in_array($status, ['trash', 'auto-draft'])) continue;
@@ -8051,7 +8060,15 @@ add_action('wp_ajax_zeekr_get_backorders_analytics', function() {
 
     $args = [
         'limit' => -1,
-        'status' => ['wc-completed', 'wc-processing', 'wc-sent', 'wc-received', 'wc-pending'],
+        // IMPORTANT: include refunded / partial-refund. A backorder line item is $0,
+        // so refunding the *regular* line item(s) on the same order can make WooCommerce
+        // flip the WHOLE order to 'refunded' (see refund handler: it skips $0 backorder
+        // lines when deciding "all fully refunded"). Excluding these statuses would hide
+        // a still-pending backorder just because an unrelated part was refunded — the
+        // ZAU3611 bug (windscreen 6608293380 vanished after the wiper blade was refunded).
+        // This report already keys off each item's own _backorder_status, so refunded
+        // orders surface only their genuinely-open backorder lines.
+        'status' => ['wc-completed', 'wc-processing', 'wc-sent', 'wc-received', 'wc-pending', 'wc-refunded', 'wc-partial-refund'],
     ];
 
     // Always filter by dealer role users to keep query fast

@@ -5742,6 +5742,37 @@ add_action('wp_ajax_zeekr_get_part_history', function() {
         $is_backorder = $item->get_meta('_is_backorder') === 'yes';
         $order_type = $item->get_meta('_dealer_order_type') ?: 'stock_order';
 
+        // Backorder fulfillment state lives on the original backorder line item:
+        // _backorder_status (pending/partially_fulfilled/fulfilled/cancelled),
+        // _fulfilled_qty, and _fulfillment_history [{order_id, qty, date}].
+        $backorder_status = '';
+        $fulfilled_qty = 0;
+        $fulfillment_orders = [];
+        if ($is_backorder) {
+            $backorder_status = $item->get_meta('_backorder_status') ?: 'pending';
+            $fulfilled_qty = (int) $item->get_meta('_fulfilled_qty');
+            $fh = $item->get_meta('_fulfillment_history');
+            if (is_array($fh)) {
+                foreach ($fh as $fh_entry) {
+                    if (!empty($fh_entry['order_id'])) {
+                        $fulfillment_orders[] = (int) $fh_entry['order_id'];
+                    }
+                }
+            }
+            $fulfillment_orders = array_values(array_unique($fulfillment_orders));
+            // Legacy rows fulfilled before _fulfillment_history existed only
+            // carry _fulfilled_order_id.
+            if (empty($fulfillment_orders)) {
+                $legacy_fulfilled = (int) $item->get_meta('_fulfilled_order_id');
+                if ($legacy_fulfilled) {
+                    $fulfillment_orders[] = $legacy_fulfilled;
+                }
+            }
+        }
+        // A fulfillment order carries _backorder_source_order pointing at the
+        // original order whose backorder it invoices.
+        $fulfills_order = (int) $order->get_meta('_backorder_source_order');
+
         // Get customer name
         $customer_id = $order->get_customer_id();
         $customer_name = '';
@@ -5796,6 +5827,10 @@ add_action('wp_ajax_zeekr_get_part_history', function() {
             'order_type' => $order_type_labels[$order_type] ?? $order_type,
             'status' => $status_labels[$status] ?? $status,
             'type' => $type,
+            'backorder_status' => $backorder_status,
+            'fulfilled_qty' => $fulfilled_qty,
+            'fulfillment_orders' => $fulfillment_orders,
+            'fulfills_order' => $fulfills_order,
         ];
 
         // Add short ship entry if applicable

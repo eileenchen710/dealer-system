@@ -9624,6 +9624,10 @@ add_action('wp_ajax_warehouse_get_orders', function() {
     $page = max(1, intval($_POST['page'] ?? 1));
     $per_page = max(10, min(200, intval($_POST['per_page'] ?? 50)));
 
+    $sortable = ['id', 'date', 'sales_order', 'po_number', 'completed_date', 'customer', 'con_note', 'status'];
+    $orderby = isset($_POST['orderby']) && in_array($_POST['orderby'], $sortable, true) ? $_POST['orderby'] : 'date';
+    $sort_dir = (isset($_POST['order']) && strtolower($_POST['order']) === 'asc') ? 'asc' : 'desc';
+
     // Warehouse manager can only see these statuses
     $allowed_statuses = ['received', 'processing', 'completed', 'partial-refund', 'refunded'];
 
@@ -9644,7 +9648,7 @@ add_action('wp_ajax_warehouse_get_orders', function() {
             'limit'   => -1,
             'return'  => 'ids',
             'orderby' => 'date',
-            'order'   => 'DESC',
+            'order'   => ($orderby === 'date' && $sort_dir === 'asc') ? 'ASC' : 'DESC',
             'type'    => 'shop_order',
             'status'  => $status_arg,
         ]));
@@ -9671,6 +9675,66 @@ add_action('wp_ajax_warehouse_get_orders', function() {
         $kept_ids = array_values(array_filter($all_ids, function ($id) use ($keep_set) {
             return isset($keep_set[$id]);
         }));
+
+        // 2b) Column sort. 'date' is already handled by the ID query above; for the
+        //     other columns build an order_id => value map with ONE bulk query, then
+        //     sort the kept ID list before paginating (still hydrating one page only).
+        if ($orderby !== 'date' && !empty($kept_ids)) {
+            if ($orderby === 'id') {
+                sort($kept_ids, SORT_NUMERIC);
+                if ($sort_dir === 'desc') {
+                    $kept_ids = array_reverse($kept_ids);
+                }
+            } else {
+                $ids_sql = implode(',', $kept_ids);
+                $value_map = [];
+                $meta_keys = [
+                    'sales_order'    => '_sales_order_number',
+                    'po_number'      => '_dealer_po_number',
+                    'completed_date' => '_dealer_completed_date',
+                    'con_note'       => '_transport_con_note',
+                ];
+                if (isset($meta_keys[$orderby])) {
+                    $rows = $wpdb->get_results($wpdb->prepare(
+                        "SELECT order_id, meta_value FROM {$wpdb->prefix}wc_orders_meta
+                         WHERE meta_key = %s AND order_id IN ({$ids_sql})",
+                        $meta_keys[$orderby]
+                    ));
+                    foreach ($rows as $r) {
+                        $value_map[(int) $r->order_id] = (string) $r->meta_value;
+                    }
+                } elseif ($orderby === 'status') {
+                    $rows = $wpdb->get_results(
+                        "SELECT id, status FROM {$wpdb->prefix}wc_orders WHERE id IN ({$ids_sql})"
+                    );
+                    foreach ($rows as $r) {
+                        $value_map[(int) $r->id] = (string) $r->status;
+                    }
+                } elseif ($orderby === 'customer') {
+                    $rows = $wpdb->get_results(
+                        "SELECT o.id, u.display_name FROM {$wpdb->prefix}wc_orders o
+                         LEFT JOIN {$wpdb->users} u ON u.ID = o.customer_id
+                         WHERE o.id IN ({$ids_sql})"
+                    );
+                    foreach ($rows as $r) {
+                        $value_map[(int) $r->id] = (string) $r->display_name;
+                    }
+                }
+                $dir_mult = ($sort_dir === 'asc') ? 1 : -1;
+                usort($kept_ids, function ($a, $b) use ($value_map, $dir_mult) {
+                    $va = trim($value_map[$a] ?? '');
+                    $vb = trim($value_map[$b] ?? '');
+                    // Rows without a value always sort last, in either direction
+                    if ($va === '' || $vb === '') {
+                        if ($va === '' && $vb === '') return $b - $a;
+                        return $va === '' ? 1 : -1;
+                    }
+                    $cmp = strnatcasecmp($va, $vb);
+                    if ($cmp === 0) return $b - $a;
+                    return $cmp * $dir_mult;
+                });
+            }
+        }
 
         // 3) Paginate the kept ID list; hydrate only the current page.
         $db_total_count = count($kept_ids);
@@ -9711,6 +9775,25 @@ add_action('wp_ajax_warehouse_get_orders', function() {
         }
     }
 
+    // Part-number search support: resolve orders whose line items' product SKU
+    // matches, via one SQL pass instead of hydrating every order's items.
+    $sku_match_ids = [];
+    if (!empty($search)) {
+        global $wpdb;
+        $like = '%' . $wpdb->esc_like($search) . '%';
+        $sku_rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT oi.order_id
+             FROM {$wpdb->prefix}woocommerce_order_items oi
+             JOIN {$wpdb->prefix}woocommerce_order_itemmeta om
+               ON om.order_item_id = oi.order_item_id AND om.meta_key = '_product_id'
+             JOIN {$wpdb->postmeta} pm
+               ON pm.post_id = om.meta_value AND pm.meta_key = '_sku'
+             WHERE oi.order_item_type = 'line_item' AND pm.meta_value LIKE %s",
+            $like
+        ));
+        $sku_match_ids = array_fill_keys(array_map('intval', $sku_rows), true);
+    }
+
     $order_data = [];
 
     foreach ($orders as $order) {
@@ -9744,7 +9827,11 @@ add_action('wp_ajax_warehouse_get_orders', function() {
             if (stripos($order_id, $clean_search) === false &&
                 stripos($order_id, $search) === false &&
                 stripos($dealer_display_name, $search) === false &&
-                stripos($dealer_company_name, $search) === false) {
+                stripos($dealer_company_name, $search) === false &&
+                stripos((string) $order->get_meta('_dealer_po_number'), $search) === false &&
+                stripos((string) $order->get_meta('_sales_order_number'), $search) === false &&
+                stripos((string) $order->get_meta('_transport_con_note'), $search) === false &&
+                !isset($sku_match_ids[$order->get_id()])) {
                 continue;
             }
         }
@@ -9824,6 +9911,31 @@ add_action('wp_ajax_warehouse_get_orders', function() {
         $total_pages = $db_total_pages;
         $paginated   = $order_data;
     } else {
+        // Search path holds the full filtered set in memory — sort it here.
+        $row_keys = [
+            'id'             => 'id',
+            'date'           => 'date',
+            'sales_order'    => 'sales_order_number',
+            'po_number'      => 'po_number',
+            'completed_date' => 'completed_date',
+            'customer'       => 'customer',
+            'con_note'       => 'con_note',
+            'status'         => 'status',
+        ];
+        $key = $row_keys[$orderby];
+        $dir_mult = ($sort_dir === 'asc') ? 1 : -1;
+        usort($order_data, function ($a, $b) use ($key, $dir_mult) {
+            $va = trim((string) $a[$key]);
+            $vb = trim((string) $b[$key]);
+            // Rows without a value always sort last, in either direction
+            if ($va === '' || $vb === '') {
+                if ($va === '' && $vb === '') return $b['id'] - $a['id'];
+                return $va === '' ? 1 : -1;
+            }
+            $cmp = strnatcasecmp($va, $vb);
+            if ($cmp === 0) return $b['id'] - $a['id'];
+            return $cmp * $dir_mult;
+        });
         $total_count = count($order_data);
         $total_pages = max(1, (int) ceil($total_count / $per_page));
         $page        = min($page, $total_pages);

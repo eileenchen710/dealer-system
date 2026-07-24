@@ -9624,7 +9624,7 @@ add_action('wp_ajax_warehouse_get_orders', function() {
     $page = max(1, intval($_POST['page'] ?? 1));
     $per_page = max(10, min(200, intval($_POST['per_page'] ?? 50)));
 
-    $sortable = ['id', 'date', 'sales_order', 'po_number', 'completed_date', 'customer', 'con_note', 'status'];
+    $sortable = ['id', 'date', 'sales_order', 'po_number', 'completed_date', 'customer', 'con_note', 'status', 'order_type'];
     $orderby = isset($_POST['orderby']) && in_array($_POST['orderby'], $sortable, true) ? $_POST['orderby'] : 'date';
     $sort_dir = (isset($_POST['order']) && strtolower($_POST['order']) === 'asc') ? 'asc' : 'desc';
 
@@ -9718,6 +9718,28 @@ add_action('wp_ajax_warehouse_get_orders', function() {
                     );
                     foreach ($rows as $r) {
                         $value_map[(int) $r->id] = (string) $r->display_name;
+                    }
+                } elseif ($orderby === 'order_type') {
+                    // Rank by urgency: VOR=0, Daily=1, Stock=2. A mixed order takes its
+                    // most urgent item's rank, so ascending sort surfaces VORs first.
+                    // Items without the meta default to stock_order, hence default rank 2.
+                    $type_rank = ['vor_order' => '0', 'daily_order' => '1', 'stock_order' => '2'];
+                    $value_map = array_fill_keys($kept_ids, '2');
+                    $rows = $wpdb->get_results(
+                        "SELECT oi.order_id, ot.meta_value AS order_type
+                         FROM {$oi_table} oi
+                         LEFT JOIN {$oim_table} ot ON ot.order_item_id = oi.order_item_id AND ot.meta_key = '_dealer_order_type'
+                         LEFT JOIN {$oim_table} mb ON mb.order_item_id = oi.order_item_id AND mb.meta_key = '_is_backorder'
+                         WHERE oi.order_item_type = 'line_item'
+                           AND oi.order_id IN ({$ids_sql})
+                           AND (mb.meta_value IS NULL OR mb.meta_value <> 'yes')"
+                    );
+                    foreach ($rows as $r) {
+                        $oid = (int) $r->order_id;
+                        $rank = $type_rank[(string) $r->order_type] ?? '2';
+                        if ($rank < $value_map[$oid]) {
+                            $value_map[$oid] = $rank;
+                        }
                     }
                 }
                 $dir_mult = ($sort_dir === 'asc') ? 1 : -1;
@@ -9857,8 +9879,15 @@ add_action('wp_ajax_warehouse_get_orders', function() {
             'vor_order' => 'VOR',
         ];
         $order_type_names = [];
+        // Urgency rank for sorting: VOR=0, Daily=1, Stock=2; a mixed order takes its most urgent item's rank
+        $type_ranks = ['vor_order' => '0', 'daily_order' => '1', 'stock_order' => '2'];
+        $order_type_rank = '2';
         foreach (array_keys($order_types_set) as $ot) {
             $order_type_names[] = $type_labels[$ot] ?? $ot;
+            $rank = $type_ranks[$ot] ?? '2';
+            if ($rank < $order_type_rank) {
+                $order_type_rank = $rank;
+            }
         }
 
         // Get completed date
@@ -9883,6 +9912,7 @@ add_action('wp_ajax_warehouse_get_orders', function() {
             'con_note' => $con_note,
             'sales_order_number' => $order->get_meta('_sales_order_number') ?: '',
             'order_types' => implode(', ', $order_type_names),
+            'order_type_rank' => $order_type_rank,
         ];
     }
 
@@ -9921,6 +9951,7 @@ add_action('wp_ajax_warehouse_get_orders', function() {
             'customer'       => 'customer',
             'con_note'       => 'con_note',
             'status'         => 'status',
+            'order_type'     => 'order_type_rank',
         ];
         $key = $row_keys[$orderby];
         $dir_mult = ($sort_dir === 'asc') ? 1 : -1;
@@ -9952,6 +9983,103 @@ add_action('wp_ajax_warehouse_get_orders', function() {
             'total_count' => $total_count,
             'total_pages' => $total_pages,
         ],
+    ]);
+});
+
+/**
+ * Consolidated Pick List: all 'received' (awaiting picking) orders grouped by
+ * dealer, with part quantities aggregated across orders. Read-only — the
+ * fulfilment / status / invoice flow is untouched; this only consolidates the
+ * physical picking view.
+ */
+add_action('wp_ajax_warehouse_get_pick_list', function() {
+    check_ajax_referer('warehouse_orders', 'nonce');
+
+    $user = wp_get_current_user();
+    if (!in_array('warehouse_manager', (array) $user->roles) && !in_array('administrator', (array) $user->roles)) {
+        wp_send_json_error(['message' => 'Permission denied']);
+        return;
+    }
+
+    $orders = wc_get_orders([
+        'limit'   => -1,
+        'orderby' => 'date',
+        'order'   => 'ASC',
+        'type'    => 'shop_order',
+        'status'  => ['received'],
+    ]);
+
+    $dealers = [];
+
+    foreach ($orders as $order) {
+        // Nothing to pick on backorder-only orders
+        if (dealer_order_is_backorder_only($order)) {
+            continue;
+        }
+
+        $customer_id = $order->get_customer_id();
+        $dealer_name = 'Guest';
+        $company = '';
+        if ($customer_id) {
+            $cu = get_userdata($customer_id);
+            if ($cu) $dealer_name = $cu->display_name;
+            $company = get_user_meta($customer_id, 'dealer_dealer_company_name', true) ?: '';
+        }
+        $dealer_key = $customer_id ?: ('guest-' . $order->get_id());
+
+        if (!isset($dealers[$dealer_key])) {
+            $dealers[$dealer_key] = [
+                'dealer'  => $dealer_name,
+                'company' => $company,
+                'orders'  => [],
+                'parts'   => [],
+            ];
+        }
+
+        $order_ref = 'ZAU' . $order->get_id();
+        $dealers[$dealer_key]['orders'][] = [
+            'id'          => $order->get_id(),
+            'ref'         => $order_ref,
+            'po_number'   => $order->get_meta('_dealer_po_number') ?: '',
+            'sales_order' => $order->get_meta('_sales_order_number') ?: '',
+            'date'        => $order->get_date_created()->format('Y-m-d H:i'),
+        ];
+
+        foreach ($order->get_items() as $item) {
+            // Backorder lines are placeholders — not pickable
+            if ($item->get_meta('_is_backorder') === 'yes') {
+                continue;
+            }
+            $product = $item->get_product();
+            $sku = $product ? $product->get_sku() : '';
+            $key = $sku ?: ('item-' . $item->get_name());
+            if (!isset($dealers[$dealer_key]['parts'][$key])) {
+                $dealers[$dealer_key]['parts'][$key] = [
+                    'sku'    => $sku ?: '-',
+                    'name'   => $item->get_name(),
+                    'qty'    => 0,
+                    'orders' => [],
+                ];
+            }
+            $qty = (int) $item->get_quantity();
+            $dealers[$dealer_key]['parts'][$key]['qty'] += $qty;
+            $dealers[$dealer_key]['parts'][$key]['orders'][] = $order_ref . ' ×' . $qty;
+        }
+    }
+
+    // Drop dealers whose received orders had no pickable lines; flatten maps
+    $result = [];
+    foreach ($dealers as $d) {
+        if (empty($d['parts'])) continue;
+        $d['parts'] = array_values($d['parts']);
+        usort($d['parts'], function ($a, $b) { return strnatcasecmp($a['sku'], $b['sku']); });
+        $result[] = $d;
+    }
+    usort($result, function ($a, $b) { return strnatcasecmp($a['dealer'], $b['dealer']); });
+
+    wp_send_json_success([
+        'dealers'      => $result,
+        'generated_at' => current_time('Y-m-d H:i'),
     ]);
 });
 

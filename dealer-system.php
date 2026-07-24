@@ -8358,9 +8358,12 @@ add_action('wp_ajax_zeekr_update_backorder_status', function() {
             }
         };
 
+        $undone_ids = [];
+
         if (!empty($fulfillment_history) && is_array($fulfillment_history)) {
             // New system: history-based undo
             if ($undo_order_id > 0) {
+                $undone_ids[] = $undo_order_id;
                 // Undo a single fulfillment entry
                 $new_history = [];
                 foreach ($fulfillment_history as $entry) {
@@ -8390,8 +8393,9 @@ add_action('wp_ajax_zeekr_update_backorder_status', function() {
                 // Undo ALL fulfillments
                 foreach ($fulfillment_history as $entry) {
                     $foid = (int) ($entry['order_id'] ?? 0);
-                    if ($foid > 0) {
+                    if ($foid > 0 && !in_array($foid, $undone_ids, true)) {
                         $undo_single_order($foid);
+                        $undone_ids[] = $foid;
                     }
                 }
                 $target_item->update_meta_data('_fulfillment_history', []);
@@ -8409,6 +8413,40 @@ add_action('wp_ajax_zeekr_update_backorder_status', function() {
             $target_item->update_meta_data('_backorder_status', 'pending');
             $target_item->update_meta_data('_fulfillment_history', []);
             $target_item->update_meta_data('_fulfilled_qty', 0);
+        }
+
+        // Whole-order fulfillment orders cover multiple lines: the cancelled
+        // fulfillment order(s) may also back OTHER lines of this order. Strip
+        // their references too, otherwise those lines keep claiming invoices
+        // and stock that were just rolled back.
+        if (!empty($undone_ids)) {
+            foreach ($order->get_items() as $sib) {
+                if ($sib->get_id() === $item_id) continue;
+                if ($sib->get_meta('_is_backorder') !== 'yes') continue;
+                $sh = $sib->get_meta('_fulfillment_history');
+                if (!is_array($sh) || empty($sh)) continue;
+                $new_sh = [];
+                $changed = false;
+                foreach ($sh as $entry) {
+                    if (in_array((int) ($entry['order_id'] ?? 0), $undone_ids, true)) {
+                        $changed = true;
+                        continue;
+                    }
+                    $new_sh[] = $entry;
+                }
+                if (!$changed) continue;
+                $sib->update_meta_data('_fulfillment_history', $new_sh);
+                $sf = 0;
+                foreach ($new_sh as $entry) $sf += (int) ($entry['qty'] ?? 0);
+                $sib->update_meta_data('_fulfilled_qty', $sf);
+                if ($sf <= 0) {
+                    $sib->update_meta_data('_backorder_status', 'pending');
+                    $sib->delete_meta_data('_fulfilled_order_id');
+                } else {
+                    $sib->update_meta_data('_backorder_status', 'partially_fulfilled');
+                }
+                $sib->save();
+            }
         }
 
         $target_item->save();
@@ -8614,6 +8652,227 @@ add_action('wp_ajax_zeekr_update_backorder_status', function() {
         'fulfilled_qty' => $quantity,
         'total_fulfilled' => $new_fulfilled_total,
         'remaining_qty' => $new_remaining,
+    ]);
+});
+
+/**
+ * Fulfill ALL outstanding backorder lines of one source order in a single
+ * action, producing ONE fulfillment order/invoice (per Andrew's confirmed
+ * requirement: one invoice per original order/PO).
+ *
+ * Per line: fulfills min(remaining, current stock); lines with no stock are
+ * skipped and stay pending. Reuses the exact same per-line semantics as the
+ * single-line handler above (price resolution, stock deduction, history
+ * entries, _backorder_source_order link → double-deduction guard applies).
+ */
+add_action('wp_ajax_zeekr_fulfill_order_backorders', function() {
+    check_ajax_referer('zeekr_analytics', 'nonce');
+
+    $user = wp_get_current_user();
+    if (!in_array('zeekr_admin', (array) $user->roles) && !in_array('administrator', (array) $user->roles)) {
+        wp_send_json_error(['message' => 'Permission denied']);
+        return;
+    }
+
+    $order_id = isset($_POST['order_id']) ? intval($_POST['order_id']) : 0;
+    if (!$order_id) {
+        wp_send_json_error(['message' => 'Missing order_id']);
+        return;
+    }
+
+    $order = wc_get_order($order_id);
+    if (!$order || $order->get_type() !== 'shop_order') {
+        wp_send_json_error(['message' => 'Order not found']);
+        return;
+    }
+
+    // Order-level lock, plus honour any in-flight per-line locks
+    $order_lock = 'backorder_fulfill_order_' . $order_id;
+    if (get_transient($order_lock)) {
+        wp_send_json_error(['message' => 'This order is currently being processed. Please try again in a moment.']);
+        return;
+    }
+    set_transient($order_lock, true, 60);
+
+    $release = function() use ($order_lock) { delete_transient($order_lock); };
+
+    // 1) Collect fulfillable lines
+    $lines = [];   // each: item, product, fulfill_qty, price, already_fulfilled, total_qty
+    $skipped = []; // each: name, reason
+    foreach ($order->get_items() as $item) {
+        if ($item->get_meta('_is_backorder') !== 'yes') continue;
+        $bo_status = $item->get_meta('_backorder_status');
+        if (!in_array($bo_status, ['pending', 'partially_fulfilled'], true)) continue;
+
+        if (get_transient('backorder_fulfill_' . $item->get_id())) {
+            $release();
+            wp_send_json_error(['message' => sprintf('Line "%s" is currently being processed. Please try again in a moment.', $item->get_name())]);
+            return;
+        }
+
+        $history = $item->get_meta('_fulfillment_history');
+        if (!is_array($history)) $history = [];
+        $already = 0;
+        foreach ($history as $entry) $already += (int) ($entry['qty'] ?? 0);
+        $total_qty = (int) $item->get_quantity();
+        $remaining = $total_qty - $already;
+        if ($remaining <= 0) continue;
+
+        $product = $item->get_product();
+        if (!$product) {
+            $skipped[] = ['name' => $item->get_name(), 'reason' => 'product not found'];
+            continue;
+        }
+        $stock = (int) $product->get_stock_quantity();
+        if ($stock <= 0) {
+            $skipped[] = ['name' => $item->get_name(), 'reason' => 'no stock'];
+            continue;
+        }
+        $fulfill_qty = min($remaining, $stock);
+
+        // Same price resolution as the single-line handler
+        $price = (float) $item->get_meta('_backorder_original_price');
+        if ($price <= 0) {
+            $order_type = $item->get_meta('_dealer_order_type') ?: 'stock_order';
+            $price = (float) get_post_meta($product->get_id(), '_' . $order_type . '_price', true);
+            if ($price <= 0) $price = (float) $product->get_price();
+        }
+
+        $lines[] = [
+            'item' => $item,
+            'product' => $product,
+            'fulfill_qty' => $fulfill_qty,
+            'remaining' => $remaining,
+            'total_qty' => $total_qty,
+            'already' => $already,
+            'price' => $price,
+            'history' => $history,
+        ];
+    }
+
+    if (empty($lines)) {
+        $release();
+        $msg = empty($skipped)
+            ? 'No outstanding backorder lines on this order.'
+            : 'Nothing fulfillable: ' . implode('; ', array_map(function($s) { return $s['name'] . ' (' . $s['reason'] . ')'; }, $skipped));
+        wp_send_json_error(['message' => $msg]);
+        return;
+    }
+
+    $customer_id = $order->get_customer_id();
+
+    // 2) Create ONE fulfillment order containing every fulfillable line
+    $new_order = wc_create_order([
+        'status' => 'pending',
+        'customer_id' => $customer_id,
+    ]);
+    if (is_wp_error($new_order)) {
+        $release();
+        wp_send_json_error(['message' => 'Failed to create order: ' . $new_order->get_error_message()]);
+        return;
+    }
+
+    foreach ($lines as &$L) {
+        // Deduct stock now (guard filter prevents WC deducting again later)
+        $cur = (int) $L['product']->get_stock_quantity();
+        $L['product']->set_stock_quantity($cur - $L['fulfill_qty']);
+        if (($cur - $L['fulfill_qty']) <= 0) {
+            $L['product']->set_stock_status('onbackorder');
+        }
+        $L['product']->save();
+
+        $new_item_id = $new_order->add_product($L['product'], $L['fulfill_qty'], [
+            'subtotal' => $L['price'] * $L['fulfill_qty'],
+            'total'    => $L['price'] * $L['fulfill_qty'],
+        ]);
+        $ot = $L['item']->get_meta('_dealer_order_type');
+        if ($ot) {
+            wc_add_order_item_meta($new_item_id, '_dealer_order_type', $ot);
+        }
+    }
+    unset($L);
+
+    // Billing / meta — identical to single-line flow
+    $new_order->set_billing_first_name($order->get_billing_first_name());
+    $new_order->set_billing_last_name($order->get_billing_last_name());
+    $new_order->set_billing_email($order->get_billing_email());
+    $new_order->set_billing_phone($order->get_billing_phone());
+    $new_order->set_billing_address_1($order->get_billing_address_1());
+    $new_order->set_billing_address_2($order->get_billing_address_2());
+    $new_order->set_billing_city($order->get_billing_city());
+    $new_order->set_billing_state($order->get_billing_state());
+    $new_order->set_billing_postcode($order->get_billing_postcode());
+    $new_order->set_billing_country($order->get_billing_country());
+    $new_order->set_payment_method('');
+    $new_order->set_payment_method_title('Dealer Account');
+    $po_number = $order->get_meta('_dealer_po_number');
+    if ($po_number) {
+        $new_order->update_meta_data('_dealer_po_number', $po_number);
+    }
+    $new_order->update_meta_data('_backorder_source_order', $order_id);
+    $new_order->update_meta_data('_sales_order_number', zeekr_get_next_sales_order_number());
+    $new_order->calculate_totals();
+    $new_order->save();
+
+    // 3) Balance check / payment — same as single-line flow
+    $balance_sufficient = false;
+    $new_order_total = (float) $new_order->get_total();
+    if ($customer_id && class_exists('YITH_YWF_Customer')) {
+        $customer = new YITH_YWF_Customer($customer_id);
+        $funds = (float) $customer->get_funds();
+        if ($funds >= $new_order_total) {
+            dealer_deduct_funds($customer_id, $new_order_total, $new_order->get_id());
+            $new_order->update_status('received', sprintf(
+                'Paid via dealer balance. Backorder fulfillment from Order #%d.',
+                $order_id
+            ));
+            $balance_sufficient = true;
+        } else {
+            $new_order->add_order_note(sprintf(
+                'Insufficient dealer balance ($%.2f available, $%.2f required). Awaiting balance adjustment. Backorder from Order #%d.',
+                $funds, $new_order_total, $order_id
+            ));
+        }
+    }
+
+    // 4) Update every source line's fulfillment meta
+    $fulfilled_summary = [];
+    foreach ($lines as $L) {
+        $item = $L['item'];
+        $history = $L['history'];
+        $history[] = [
+            'order_id' => $new_order->get_id(),
+            'qty' => $L['fulfill_qty'],
+            'date' => date('Y-m-d H:i:s'),
+        ];
+        $item->update_meta_data('_fulfillment_history', $history);
+        $new_total_fulfilled = $L['already'] + $L['fulfill_qty'];
+        $item->update_meta_data('_fulfilled_qty', $new_total_fulfilled);
+        $item->update_meta_data('_fulfilled_order_id', $new_order->get_id());
+        $item->update_meta_data('_backorder_status', ($L['total_qty'] - $new_total_fulfilled <= 0) ? 'fulfilled' : 'partially_fulfilled');
+        $item->save();
+        $fulfilled_summary[] = sprintf('%s ×%d', $item->get_name(), $L['fulfill_qty']);
+    }
+
+    $order->add_order_note(sprintf(
+        'Backorder fulfillment (whole order) by %s: %s → invoice ZAU%d.%s',
+        $user->display_name,
+        implode(', ', $fulfilled_summary),
+        $new_order->get_id(),
+        empty($skipped) ? '' : ' Skipped: ' . implode('; ', array_map(function($s) { return $s['name'] . ' (' . $s['reason'] . ')'; }, $skipped))
+    ));
+
+    $release();
+
+    wp_send_json_success([
+        'message' => sprintf('%d line(s) fulfilled on one invoice ZAU%d.%s',
+            count($lines), $new_order->get_id(),
+            empty($skipped) ? '' : sprintf(' %d line(s) skipped (no stock).', count($skipped))),
+        'new_order_id' => $new_order->get_id(),
+        'new_order_status' => $balance_sufficient ? 'received' : 'pending',
+        'balance_sufficient' => $balance_sufficient,
+        'fulfilled_lines' => count($lines),
+        'skipped_lines' => $skipped,
     ]);
 });
 

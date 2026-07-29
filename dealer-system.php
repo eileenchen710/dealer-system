@@ -8093,41 +8093,56 @@ add_action('wp_ajax_zeekr_get_backorders_analytics', function() {
     $after_timestamp = !empty($after) ? strtotime($after) : 0;
     $before_timestamp = !empty($before) ? strtotime($before . ' 23:59:59') : time();
 
-    $args = [
-        'limit' => -1,
-        // IMPORTANT: include refunded / partial-refund. A backorder line item is $0,
-        // so refunding the *regular* line item(s) on the same order can make WooCommerce
-        // flip the WHOLE order to 'refunded' (see refund handler: it skips $0 backorder
-        // lines when deciding "all fully refunded"). Excluding these statuses would hide
-        // a still-pending backorder just because an unrelated part was refunded — the
-        // ZAU3611 bug (windscreen 6608293380 vanished after the wiper blade was refunded).
-        // This report already keys off each item's own _backorder_status, so refunded
-        // orders surface only their genuinely-open backorder lines.
-        'status' => ['wc-completed', 'wc-processing', 'wc-sent', 'wc-received', 'wc-pending', 'wc-refunded', 'wc-partial-refund'],
-    ];
+    // Prod FPM runs this handler at 128M/30s regardless of the pool config —
+    // hydrating every order blows both. Raise in-code AND pre-filter via SQL.
+    @ini_set('memory_limit', '512M');
+    @set_time_limit(120);
 
-    // Always filter by dealer role users to keep query fast
-    if (!empty($dealer_ids)) {
-        $args['customer_id'] = $dealer_ids;
-    } else {
-        // Get all dealer user IDs so we don't query ALL orders in the system
-        $dealer_users = get_users(['role' => 'dealer', 'fields' => 'ID']);
-        if (!empty($dealer_users)) {
-            $args['customer_id'] = array_map('intval', $dealer_users);
-        }
+    global $wpdb;
+
+    // IMPORTANT: include refunded / partial-refund. A backorder line item is $0,
+    // so refunding the *regular* line item(s) on the same order can make WooCommerce
+    // flip the WHOLE order to 'refunded' (see refund handler: it skips $0 backorder
+    // lines when deciding "all fully refunded"). Excluding these statuses would hide
+    // a still-pending backorder just because an unrelated part was refunded — the
+    // ZAU3611 bug (windscreen 6608293380 vanished after the wiper blade was refunded).
+    // This report already keys off each item's own _backorder_status, so refunded
+    // orders surface only their genuinely-open backorder lines.
+    $statuses = ['wc-completed', 'wc-processing', 'wc-sent', 'wc-received', 'wc-pending', 'wc-refunded', 'wc-partial-refund'];
+
+    $customer_ids = $dealer_ids;
+    if (empty($customer_ids)) {
+        // Restrict to dealer role users so we don't scan ALL orders in the system
+        $customer_ids = array_map('intval', get_users(['role' => 'dealer', 'fields' => 'ID']));
     }
 
-    // Filter by date range at query level for performance
+    $where = "o.type = 'shop_order' AND o.status IN ('" . implode("','", array_map('esc_sql', $statuses)) . "')";
+    if (!empty($customer_ids)) {
+        $where .= ' AND o.customer_id IN (' . implode(',', $customer_ids) . ')';
+    }
+    // Loose date bounds at SQL level (±1 day covers GMT vs local skew);
+    // the loop below still applies the exact local-time range.
     if (!empty($after)) {
-        $args['date_created'] = '>=' . gmdate('Y-m-d', strtotime($after));
+        $where .= $wpdb->prepare(' AND o.date_created_gmt >= %s', gmdate('Y-m-d 00:00:00', strtotime($after) - DAY_IN_SECONDS));
     }
     if (!empty($before)) {
-        $args['date_created'] = isset($args['date_created'])
-            ? ($args['date_created'] . '...' . gmdate('Y-m-d', strtotime($before)))
-            : ('<=' . gmdate('Y-m-d', strtotime($before)));
+        $where .= $wpdb->prepare(' AND o.date_created_gmt <= %s', gmdate('Y-m-d 23:59:59', strtotime($before) + DAY_IN_SECONDS));
     }
 
-    $orders = wc_get_orders($args);
+    // Only hydrate orders that actually contain a backorder line: _is_backorder=yes
+    // or a $0 line total (same two signals the item loop below checks).
+    $order_ids = $wpdb->get_col(
+        "SELECT DISTINCT oi.order_id
+         FROM {$wpdb->prefix}woocommerce_order_items oi
+         JOIN {$wpdb->prefix}wc_orders o ON o.id = oi.order_id
+         LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta bo
+             ON bo.order_item_id = oi.order_item_id AND bo.meta_key = '_is_backorder'
+         LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta lt
+             ON lt.order_item_id = oi.order_item_id AND lt.meta_key = '_line_total'
+         WHERE oi.order_item_type = 'line_item'
+           AND (bo.meta_value = 'yes' OR CAST(lt.meta_value AS DECIMAL(12,4)) = 0)
+           AND {$where}"
+    );
 
     $backorders_list = [];
     $totals = [
@@ -8140,7 +8155,14 @@ add_action('wp_ajax_zeekr_get_backorders_analytics', function() {
         'cancelled_count' => 0,
     ];
 
-    foreach ($orders as $order) {
+    $dealer_name_cache = [];
+
+    foreach ($order_ids as $matched_order_id) {
+        $order = wc_get_order($matched_order_id);
+        if (!$order) {
+            continue;
+        }
+
         // Filter by date range
         $order_date = $order->get_date_created();
         if ($order_date) {
@@ -8156,16 +8178,21 @@ add_action('wp_ajax_zeekr_get_backorders_analytics', function() {
         $order_id = $order->get_id();
         $customer_id = $order->get_customer_id();
 
-        // Get dealer name
+        // Get dealer name (cached per customer — same dealer appears on many orders)
         $dealer_name = '';
         if ($customer_id) {
-            $customer = get_user_by('id', $customer_id);
-            if ($customer) {
-                $dealer_name = get_user_meta($customer_id, 'dealer_name', true);
-                if (empty($dealer_name)) {
-                    $dealer_name = $customer->display_name;
+            if (!isset($dealer_name_cache[$customer_id])) {
+                $name = '';
+                $customer = get_user_by('id', $customer_id);
+                if ($customer) {
+                    $name = get_user_meta($customer_id, 'dealer_name', true);
+                    if (empty($name)) {
+                        $name = $customer->display_name;
+                    }
                 }
+                $dealer_name_cache[$customer_id] = $name;
             }
+            $dealer_name = $dealer_name_cache[$customer_id];
         }
         if (empty($dealer_name)) {
             $dealer_name = $order->get_billing_first_name() . ' ' . $order->get_billing_last_name();

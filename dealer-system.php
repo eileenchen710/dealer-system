@@ -8728,6 +8728,23 @@ add_action('wp_ajax_zeekr_fulfill_order_backorders', function() {
         return;
     }
 
+    // Optional operator-chosen quantities: JSON map of item_id => qty.
+    // When present, lines omitted or set to 0 are skipped, and any line that
+    // can't be fulfilled at the requested qty rejects the WHOLE request —
+    // nothing ships unless it matches what the operator confirmed on screen.
+    $line_qty_map = null;
+    if (isset($_POST['line_quantities']) && $_POST['line_quantities'] !== '') {
+        $decoded = json_decode(stripslashes((string) $_POST['line_quantities']), true);
+        if (!is_array($decoded)) {
+            wp_send_json_error(['message' => 'Invalid line quantities payload']);
+            return;
+        }
+        $line_qty_map = [];
+        foreach ($decoded as $k => $v) {
+            $line_qty_map[(int) $k] = (int) $v;
+        }
+    }
+
     // Order-level lock, plus honour any in-flight per-line locks
     $order_lock = 'backorder_fulfill_order_' . $order_id;
     if (get_transient($order_lock)) {
@@ -8766,11 +8783,31 @@ add_action('wp_ajax_zeekr_fulfill_order_backorders', function() {
             continue;
         }
         $stock = (int) $product->get_stock_quantity();
-        if ($stock <= 0) {
-            $skipped[] = ['name' => $item->get_name(), 'reason' => 'no stock'];
-            continue;
+
+        if ($line_qty_map !== null) {
+            $requested = isset($line_qty_map[$item->get_id()]) ? $line_qty_map[$item->get_id()] : 0;
+            if ($requested <= 0) {
+                $skipped[] = ['name' => $item->get_name(), 'reason' => 'skipped by operator'];
+                continue;
+            }
+            if ($requested > $remaining) {
+                $release();
+                wp_send_json_error(['message' => sprintf('"%s": requested %d but only %d still owing. Nothing was released — please refresh and try again.', $item->get_name(), $requested, $remaining)]);
+                return;
+            }
+            if ($requested > $stock) {
+                $release();
+                wp_send_json_error(['message' => sprintf('"%s": requested %d but only %d in stock. Nothing was released — adjust the quantity and try again.', $item->get_name(), $requested, $stock)]);
+                return;
+            }
+            $fulfill_qty = $requested;
+        } else {
+            if ($stock <= 0) {
+                $skipped[] = ['name' => $item->get_name(), 'reason' => 'no stock'];
+                continue;
+            }
+            $fulfill_qty = min($remaining, $stock);
         }
-        $fulfill_qty = min($remaining, $stock);
 
         // Same price resolution as the single-line handler
         $price = (float) $item->get_meta('_backorder_original_price');
@@ -8909,7 +8946,7 @@ add_action('wp_ajax_zeekr_fulfill_order_backorders', function() {
     wp_send_json_success([
         'message' => sprintf('%d line(s) fulfilled on one invoice ZAU%d.%s',
             count($lines), $new_order->get_id(),
-            empty($skipped) ? '' : sprintf(' %d line(s) skipped (no stock).', count($skipped))),
+            empty($skipped) ? '' : sprintf(' %d line(s) skipped (still on backorder).', count($skipped))),
         'new_order_id' => $new_order->get_id(),
         'new_order_status' => $balance_sufficient ? 'received' : 'pending',
         'balance_sufficient' => $balance_sufficient,

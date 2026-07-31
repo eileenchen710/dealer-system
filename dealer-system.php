@@ -3118,14 +3118,24 @@ add_filter('woocommerce_add_order_again_cart_item', function($cart_item, $cart_i
 
     $quantity = $cart_item['quantity'] ?? 1;
     $stock_quantity = $product->get_stock_quantity();
-    $price = (float) $product->get_price();
+
+    // Price must come from the dealer order-type price meta, same as the normal
+    // add-to-cart path. $product->get_price() is the WooCommerce _price (RRP
+    // placeholder), which on many parts differs from the dealer price — using it
+    // here overcharged Order Again lines (e.g. ZAU7513: charged $200/unit
+    // instead of the $131.26 dealer price).
+    $order_type = $cart_item['dealer_order_type'] ?? 'stock_order';
+    $price = (float) get_post_meta($product->get_id(), '_' . $order_type . '_price', true);
+    if ($price <= 0) {
+        $price = (float) $product->get_price();
+    }
 
     // Check if item needs to be backordered (stock is less than requested quantity)
     // If stock_quantity is null, treat as unlimited stock (no backorder needed)
     $needs_backorder = ($stock_quantity !== null && $stock_quantity < $quantity);
 
     // Set cart item data
-    $cart_item['dealer_order_type'] = $cart_item['dealer_order_type'] ?? 'stock_order';
+    $cart_item['dealer_order_type'] = $order_type;
     $cart_item['dealer_custom_price'] = $needs_backorder ? 0 : $price;
     $cart_item['is_backorder'] = $needs_backorder;
     $cart_item['backorder_original_price'] = $needs_backorder ? $price : 0;

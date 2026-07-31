@@ -4926,6 +4926,21 @@ function zeekr_create_credit_note($order, $cr_lines, $opts = []) {
         ));
         $order->save();
 
+        // Once credit notes cover the full order value, mark the order Refunded so the
+        // warehouse list stops showing it as pickable (Toll request 2026-07-30). The
+        // warehouse status handler blocks further changes on refunded orders. Analytics
+        // excludes refunded status and these orders already net $0, so revenue is
+        // unaffected. WC core will add a bookkeeping refund record for the balance.
+        if (!in_array($order->get_status(), ['refunded', 'cancelled'], true)) {
+            $total_credited = (float) $wpdb->get_var($wpdb->prepare(
+                "SELECT SUM(total_inc_gst) FROM {$wpdb->prefix}dealer_credit_notes WHERE source_order_id = %d",
+                $order_id
+            ));
+            if ($total_credited >= (float) $order->get_total() - 0.01) {
+                $order->update_status('refunded', sprintf('Fully credited by credit note(s) totalling $%s — status set to Refunded automatically.', number_format($total_credited, 2)));
+            }
+        }
+
         return [
             'id'            => $cr_id,
             'cr_number'     => $cr_number,

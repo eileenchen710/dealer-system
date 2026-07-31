@@ -8267,12 +8267,17 @@ add_action('wp_ajax_zeekr_get_backorders_analytics', function() {
                 $unit_price = (float) $product->get_price();
             }
 
+            // Order type per line, short labels per Zeekr's own taxonomy (Stock/Daily/VOR)
+            $bo_type_labels = ['stock_order' => 'Stock', 'daily_order' => 'Daily', 'vor_order' => 'VOR', 'list_order' => 'List'];
+            $bo_order_type = $item->get_meta('_dealer_order_type') ?: 'stock_order';
+
             $backorders_list[] = [
                 'item_id' => $item->get_id(),
                 'order_id' => $order_id,
                 'dealer_name' => trim($dealer_name),
                 'part_number' => $product ? $product->get_sku() : '',
                 'product_name' => $item->get_name(),
+                'order_type' => $bo_type_labels[$bo_order_type] ?? $bo_order_type,
                 'quantity' => $total_qty,
                 'fulfilled_qty' => $fulfilled_qty,
                 'remaining_qty' => $remaining_qty,
